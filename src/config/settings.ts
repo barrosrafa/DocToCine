@@ -7,7 +7,7 @@ const optionalSecret = z.preprocess(
 const EnvSchema = z.object({
   GEMINI_API_KEY: optionalSecret,
   GOOGLE_API_KEY: optionalSecret,
-  GEMINI_MODEL: z.string().trim().min(1).default('gemini-2.5-flash'),
+  GEMINI_MODEL: z.string().trim().min(1).default('gemini-3.5-flash-lite'),
   TTS_PROVIDER: z.enum(['google_cloud', 'fake']).default('fake'),
   TTS_LANGUAGE: z.string().trim().min(2).default('pt-BR'),
   TTS_VOICE: z.string().trim().min(1).default('pt-BR-Standard-A'),

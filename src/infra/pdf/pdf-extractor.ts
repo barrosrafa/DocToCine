@@ -1,5 +1,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import { AppError } from '../../core/errors/app-error.js';
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
+
 export type ExtractedPage = { pageNumber: number; text: string; charCount: number };
 export function cleanText(text: string) {
   return text
@@ -29,20 +31,41 @@ export async function extractPdf(
       code: 'PDF_INVALID',
       stage: 'pdf_extraction',
     });
-  const text = data.toString('latin1').replace(/[^\x09\x0A\x0D\x20-\x7EÀ-ÿ]/g, ' ');
-  const raw = text
-    .split(/\f|\/Type\s*\/Page\b/g)
-    .map(cleanText)
-    .filter(Boolean);
-  const pages = raw
-    .slice(0, o.maxPages)
-    .map((t, i) => ({ pageNumber: i + 1, text: t, charCount: t.length }));
-  if (raw.length > o.maxPages)
+
+  let doc;
+  try {
+    const loadingTask = pdfjsLib.getDocument({
+      data: new Uint8Array(data),
+      useSystemFonts: true,
+    });
+    doc = await loadingTask.promise;
+  } catch (err) {
+    throw new AppError('Falha ao processar a estrutura do PDF.', {
+      code: 'PDF_INVALID',
+      stage: 'pdf_extraction',
+      cause: err,
+    });
+  }
+
+  if (doc.numPages > o.maxPages)
     throw new AppError('PDF excede o máximo configurado de páginas.', {
       code: 'PDF_PAGE_LIMIT',
       stage: 'pdf_extraction',
     });
-  if (!pages.length)
+
+  const pages: ExtractedPage[] = [];
+  for (let i = 1; i <= doc.numPages; i++) {
+    const page = await doc.getPage(i);
+    const content = await page.getTextContent();
+    const str = content.items
+      .map((item) => ('str' in item && typeof item.str === 'string' ? item.str : ''))
+      .join(' ');
+    const text = cleanText(str);
+    pages.push({ pageNumber: i, text, charCount: text.length });
+  }
+
+  const hasAnyText = pages.some((p) => p.text.length > 0);
+  if (!hasAnyText)
     throw new AppError('PDF não contém camada de texto; OCR é necessário.', {
       code: 'EMPTY_EXTRACTION',
       stage: 'pdf_extraction',

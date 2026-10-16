@@ -3,7 +3,11 @@ import { resolve } from 'node:path';
 import { buildCli } from './cli/build-cli.js';
 import { ArtifactStore } from './infra/storage/artifact-store.js';
 import { BookPipeline } from './application/pipelines/book-pipeline.js';
+import { VideoPipeline } from './application/pipelines/video-pipeline.js';
+import { GeminiLlmProvider } from './infra/llm/gemini-provider.js';
+import { loadSettings } from './config/settings.js';
 import { asError } from './core/errors/app-error.js';
+
 export async function run(argv = process.argv) {
   const cli = buildCli();
   cli.parse(argv);
@@ -12,9 +16,11 @@ export async function run(argv = process.argv) {
     chapters: string;
     durations: string;
     renderVideos?: boolean;
+    aspectRatio?: string;
   }>();
   const pdf = cli.args[0] as string;
   try {
+    const settings = loadSettings();
     const output = resolve(opts.output);
     const store = new ArtifactStore(output);
     const durations = opts.durations
@@ -22,7 +28,18 @@ export async function run(argv = process.argv) {
       .map(Number)
       .filter((d): d is 1 | 3 | 20 => d === 1 || d === 3 || d === 20);
     if (!durations.length) throw new Error('Informe ao menos uma duração válida: 1, 3 ou 20.');
-    const result = await new BookPipeline(store).run(
+
+    const [width, height] =
+      opts.aspectRatio === '9:16'
+        ? [settings.VIDEO_HEIGHT, settings.VIDEO_WIDTH]
+        : [settings.VIDEO_WIDTH, settings.VIDEO_HEIGHT];
+
+    const video = new VideoPipeline(store, width, height, settings.BURN_CAPTIONS);
+
+    const apiKey = settings.GEMINI_API_KEY || settings.GOOGLE_API_KEY;
+    const llm = apiKey ? new GeminiLlmProvider(apiKey, settings.GEMINI_MODEL) : undefined;
+
+    const result = await new BookPipeline(store, video, llm).run(
       resolve(pdf),
       Number(opts.chapters),
       durations,

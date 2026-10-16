@@ -3,9 +3,16 @@ import { ChapterMapSchema } from '../../domain/schemas/chapter.schema.js';
 export function likelyChapterPages(
   pages: { pageNumber: number; text: string }[] | string[],
 ): number[] {
+  const pattern =
+    /^\s*(cap[ií]tulo|chapter|pr[oó]logo|ep[ií]logo)\b|^\s*(um|dois|tr[eê]s|quatro|cinco|seis|sete|oito|nove|dez|onze|doze|treze|catorze|quatorze|quinze|dezesseis|dezessete|dezoito|dezenove|vinte)\b/im;
   return pages
     .map((p, i) => ({ text: typeof p === 'string' ? p : p.text, number: i + 1 }))
-    .filter((p) => /^\s*(cap[ií]tulo|chapter)\b/im.test(p.text))
+    .filter((p) => {
+      if (/^\s*(sum[aá]rio|[ií]ndice|contents|m[ií]dias sociais|cr[eé]ditos)/im.test(p.text))
+        return false;
+      if ((p.text.match(/cap[ií]tulo/gi) || []).length > 2) return false;
+      return pattern.test(p.text.slice(0, 200));
+    })
     .map((p) => p.number);
 }
 export function validateBoundaries(
