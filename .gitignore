@@ -1,7 +1,11 @@
 node_modules/
-typescript/node_modules/
-typescript/dist/
-typescript/coverage/
-typescript/.env
+dist/
+coverage/
+.env
+.env.*.local
+.DS_Store
+*.DS_Store
+saida*/
 *.partial.mp4
 *.tmp
+
