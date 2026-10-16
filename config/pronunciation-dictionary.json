@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "language": "pt-BR",
+  "abbreviations": {
+    "cap.": "capítulo",
+    "pág.": "página",
+    "págs.": "páginas",
+    "século XXI": "século vinte e um",
+    "século XX": "século vinte",
+    "século XIX": "século dezenove",
+    "Dr.": "Doutor",
+    "Dra.": "Doutora",
+    "Sr.": "Senhor",
+    "Sra.": "Senhora"
+  },
+  "acronyms": {
+    "IA": "inteligência artificial",
+    "PDF": "Pê Dê Éfe",
+    "TTS": "síntese de voz"
+  },
+  "properNouns": {}
+}

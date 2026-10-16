@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 2,
+  "title": "Capítulo 1: A Arquitetura do Tempo",
+  "durationMinutes": 1,
+  "language": "pt-BR",
+  "targetAudience": "Público geral e leitores",
+  "tone": "cinematografico",
+  "hook": "O que acontece quando percebemos que a memória não guarda o passado, mas o reconstrói a cada instante?",
+  "beats": [
+    "O enigma da percepção temporal",
+    "As camadas de evidência no arquivo",
+    "A síntese entre razão e memória"
+  ],
+  "narration": "O que acontece quando percebemos que a memória não guarda o passado, mas o reconstrói a cada instante? No primeiro capítulo, acompanhamos a chegada do investigador à biblioteca silenciosa onde os manuscritos originais foram preservados por décadas, revelando anotações nas margens que mudam o sentido da crônica oficial.\n\nÀ medida que os registros são comparados, surge o conflito central entre o relato público e as cartas privadas encontradas no cofre. Cada documento aponta para uma decisão tomada na véspera da expedição, demonstrando como pequenas escolhas alteram o curso de uma geração inteira.\n\nPor fim, a descoberta do mapa incompleto redefine a missão dos protagonistas e deixa claro que compreender o passado exige coragem para questionar certezas antigas. Acompanhe os próximos episódios para descobrir o desfecho dessa jornada.",
+  "segments": [
+    {
+      "id": "seg_0001",
+      "text": "O que acontece quando percebemos que a memória não guarda o passado, mas o reconstrói a cada instante? No primeiro capítulo, acompanhamos a chegada do investigador à biblioteca silenciosa onde os manuscritos originais foram preservados por décadas, revelando anotações nas margens que mudam o sentido da crônica oficial.",
+      "sceneHint": "Interior de biblioteca clássica iluminada por feixes de luz âmbar sobre manuscritos antigos",
+      "onScreenText": "O enigma da percepção temporal",
+      "sourcePages": [1, 2]
+    },
+    {
+      "id": "seg_0002",
+      "text": "À medida que os registros são comparados, surge o conflito central entre o relato público e as cartas privadas encontradas no cofre. Cada documento aponta para uma decisão tomada na véspera da expedição, demonstrando como pequenas escolhas alteram o curso de uma geração inteira.",
+      "sceneHint": "Mesa de madeira com cartas antigas, selos de cera e uma lupa sob iluminação dramática",
+      "onScreenText": "As camadas de evidência no arquivo",
+      "sourcePages": [2, 3]
+    },
+    {
+      "id": "seg_0003",
+      "text": "Por fim, a descoberta do mapa incompleto redefine a missão dos protagonistas e deixa claro que compreender o passado exige coragem para questionar certezas antigas. Acompanhe os próximos episódios para descobrir o desfecho dessa jornada.",
+      "sceneHint": "Mapa náutico antigo aberto com bússola de bronze em primeiro plano",
+      "onScreenText": "A síntese entre razão e memória",
+      "sourcePages": [3, 4]
+    }
+  ],
+  "cta": "Acompanhe os próximos episódios para descobrir o desfecho dessa jornada.",
+  "bRollAndVisuals": [
+    "Interior de biblioteca clássica iluminada por feixes de luz âmbar sobre manuscritos antigos",
+    "Mesa de madeira com cartas antigas, selos de cera e uma lupa sob iluminação dramática",
+    "Mapa náutico antigo aberto com bússola de bronze em primeiro plano"
+  ],
+  "sourcePages": [1, 2, 3, 4],
+  "claims": [
+    {
+      "claimId": "claim_001",
+      "claim": "O investigador encontra manuscritos com anotações nas margens na biblioteca.",
+      "sourcePages": [1, 2],
+      "chunkIds": ["ch01_chunk_01"],
+      "confidence": "high"
+    }
+  ]
+}

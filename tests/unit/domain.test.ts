@@ -51,7 +51,24 @@ describe('configurações OpenRouter por atividade e segurança', () => {
     expect(s.OPENROUTER_AUDIO_MODEL).toBe('openai/gpt-audio-mini');
     expect(s.OPENROUTER_FALLBACK_MODELS.length).toBeGreaterThanOrEqual(3);
     expect(s.TTS_PROVIDER).toBe('openrouter');
-    expect(s.SCENE_PROVIDER).toBe('openrouter');
+    expect(s.OPENROUTER_TTS_MODEL).toBe('openai/gpt-4o-mini-tts-2025-12-15');
+    expect(s.OPENROUTER_TTS_VOICE).toBe('nova');
+    expect(s.OPENROUTER_TTS_FALLBACK_MODEL).toBe('hexgrad/kokoro-82m');
+    expect(s.OPENROUTER_TTS_SPEED).toBe(1);
+    expect(s.OPENROUTER_TTS_FORMAT).toBe('mp3');
+    expect(s.TTS_MAX_CHARS_PER_REQUEST).toBe(1800);
+    expect(s.TTS_MAX_PARALLEL_REQUESTS).toBe(2);
+    expect(s.TTS_ALLOW_SYNTHETIC_FIXTURE).toBe(false);
+    expect(s.VISUAL_SHOT_TARGET_SECONDS).toBe(8);
+    expect(s.AI_IMAGE_MIN_INTERVAL_SECONDS).toBe(18);
+    expect(s.MAX_GENERATED_IMAGES_PER_VIDEO).toBe(80);
+    expect(s.SCENE_CACHE_ENABLED).toBe(true);
+    expect(s.ENABLE_WORD_ALIGNMENT).toBe(true);
+    expect(s.ALIGNMENT_PROVIDER).toBe('whisperx');
+    expect(s.TARGET_WORDS_PER_MINUTE).toBe(135);
+    expect(s.SCRIPT_DURATION_TOLERANCE_PERCENT).toBe(8);
+    expect(s.MAX_JOB_COST_USD).toBe(5);
+    expect(s.COST_LIMIT_ACTION).toBe('stop');
   });
 
   it('rejeita URLs inseguras (HTTP externo) e remove OPENROUTER_API_KEY em publicSettings', () => {

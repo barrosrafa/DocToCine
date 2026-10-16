@@ -3,6 +3,8 @@ coverage
 node_modules
 saida*
 *.partial.mp4
+*.partial
 *.tmp
 package-lock.json
-
+tests/fixtures/**
+tools/**

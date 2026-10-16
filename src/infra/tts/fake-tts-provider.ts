@@ -1,13 +1,18 @@
 import { mkdir, unlink, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { spawn } from 'node:child_process';
-import type { TimedSpeech, TtsProvider } from '../../domain/ports/tts-provider.js';
+import { AppError } from '../../core/errors/app-error.js';
+import type {
+  TimedSpeech,
+  TtsProvider,
+  TtsSegmentsSynthesisResult,
+} from '../../domain/ports/tts-provider.js';
 
 export type Timed = TimedSpeech;
 
 function execProcess(cmd: string, args: string[]): Promise<string> {
   return new Promise((res, rej) => {
-    const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const p = spawn(cmd, args, { shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     p.stdout.on('data', (d) => (stdout += String(d)));
@@ -17,11 +22,25 @@ function execProcess(cmd: string, args: string[]): Promise<string> {
   });
 }
 
+export type SyntheticFixtureOptions = {
+  allowSyntheticFixture?: boolean;
+  preferSystemSay?: boolean;
+};
+
 export class FakeTtsProvider implements TtsProvider {
-  constructor(readonly secondsPerWord = 0.4) {}
+  private readonly allowSyntheticFixture: boolean;
+  private readonly preferSystemSay: boolean;
+
+  constructor(
+    readonly secondsPerWord = 0.4,
+    options: SyntheticFixtureOptions = {},
+  ) {
+    this.allowSyntheticFixture = options.allowSyntheticFixture ?? true;
+    this.preferSystemSay = options.preferSystemSay ?? true;
+  }
 
   private async trySay(text: string, path: string): Promise<number | null> {
-    if (process.platform !== 'darwin') return null;
+    if (!this.preferSystemSay || process.platform !== 'darwin') return null;
     const aiffPath = `${path}.aiff`;
     try {
       await execProcess('say', ['-v', 'Luciana', text, '-o', aiffPath]);
@@ -55,13 +74,34 @@ export class FakeTtsProvider implements TtsProvider {
     }
   }
 
-  async synthesize(text: string, path: string): Promise<{ path: string; duration: number }> {
+  async synthesize(
+    text: string,
+    path: string,
+  ): Promise<{
+    path: string;
+    duration: number;
+    degraded?: boolean;
+    model?: string;
+    voice?: string;
+  }> {
+    if (!this.allowSyntheticFixture) {
+      throw new AppError(
+        'Provedor TTS sintético/fixture bloqueado em modo de produção (defina TTS_ALLOW_SYNTHETIC_FIXTURE=true apenas para testes).',
+        { code: 'TTS_UNAVAILABLE', stage: 'audio', retryable: false },
+      );
+    }
     if (!text.trim()) throw new Error('segmento vazio');
     await mkdir(dirname(path), { recursive: true });
 
     const sayDuration = await this.trySay(text, path);
     if (sayDuration !== null) {
-      return { path, duration: sayDuration };
+      return {
+        path,
+        duration: sayDuration,
+        degraded: true,
+        model: 'synthetic-fixture-say',
+        voice: 'Luciana',
+      };
     }
 
     // Audible tone WAV fallback if say is unavailable
@@ -86,7 +126,6 @@ export class FakeTtsProvider implements TtsProvider {
     bytes.write('data', 36);
     bytes.writeUInt32LE(totalSamples * 2, 40);
 
-    // Subtle 220Hz pleasant tone with fade-in and fade-out envelope
     for (let i = 0; i < totalSamples; i++) {
       const t = i / sampleRate;
       const attack = Math.min(1, i / (sampleRate * 0.1));
@@ -118,13 +157,19 @@ export class FakeTtsProvider implements TtsProvider {
       }
     }
 
-    return { path, duration };
+    return {
+      path,
+      duration,
+      degraded: true,
+      model: 'synthetic-fixture-tone',
+      voice: 'synthetic',
+    };
   }
 
   async synthesizeSegments(
     segments: { id: string; text: string }[],
     dir: string,
-  ): Promise<{ timed: Timed[]; duration: number }> {
+  ): Promise<TtsSegmentsSynthesisResult> {
     let cursor = 0;
     const timed: Timed[] = [];
     for (const s of segments) {
@@ -134,9 +179,21 @@ export class FakeTtsProvider implements TtsProvider {
         text: s.text,
         startSeconds: cursor,
         endSeconds: cursor + r.duration,
+        path: r.path,
+        ...(r.model !== undefined ? { model: r.model } : {}),
+        ...(r.voice !== undefined ? { voice: r.voice } : {}),
+        degraded: true,
       });
       cursor += r.duration;
     }
-    return { timed, duration: cursor };
+    return {
+      timed,
+      duration: cursor,
+      degraded: true,
+      usedModels: ['synthetic-fixture'],
+      warnings: ['Áudio gerado por FakeTtsProvider (fixture de teste).'],
+    };
   }
 }
+
+export { FakeTtsProvider as SyntheticFixtureTtsProvider };

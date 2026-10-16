@@ -703,15 +703,28 @@ npm test
 # Executar com relatório de cobertura V8:
 npm run coverage
 
+# Executar benchmark de modelos LLM em golden fixtures:
+npm run evaluate:models
+
 # Executar diretamente em desenvolvimento via tsx (apenas roteiros):
 npm run dev -- /caminho/para/livro.pdf --output saida --chapters 3 --durations 1,3,20
 
-# Executar pipeline completo com renderização de vídeos MP4 (16:9):
-node dist/main.js /caminho/para/livro.pdf --output saida --chapters 3 --durations 1,3,20 --render-videos
+# Executar pipeline v2 com resume idempotente e governança de custo:
+node dist/main.js /caminho/para/livro.pdf --output saida --chapters 1 --durations 1 --render-videos --max-cost-usd 3.0 --verbose
 
 # Executar pipeline para Shorts/Reels/TikTok na vertical (9:16):
 node dist/main.js /caminho/para/livro.pdf --output saida_vertical --chapters 1 --durations 1 --aspect-ratio 9:16 --render-videos
 ```
+
+### Códigos de Saída POSIX Semânticos
+
+| Código  | Significado         | Descrição                                                                                         |
+| :-----: | :------------------ | :------------------------------------------------------------------------------------------------ |
+| **`0`** | Sucesso Total       | Todos os capítulos e vídeos solicitados foram gerados e aprovados nos quality gates.              |
+| **`1`** | Erro Fatal          | Erro de configuração, argumentos inválidos, falha crítica no PDF ou chave obrigatória ausente.    |
+| **`2`** | Sucesso Parcial     | Alguns capítulos ou vídeos falharam, mas `--continue-on-error` permitiu concluir os demais.       |
+| **`3`** | Limite de Orçamento | Interrupção segura acionada pelo `CostGuard` ao atingir `--max-cost-usd`.                         |
+| **`4`** | Quality Gate Falhou | Vídeo gerado foi reprovado na validação técnica de resolução, FPS ou sincronia de áudio/legendas. |
 
 ---
 

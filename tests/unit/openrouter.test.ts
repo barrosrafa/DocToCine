@@ -36,25 +36,41 @@ describe('OpenRouterLlmProvider & utilitários de protocolo', () => {
     ]);
   });
 
-  it('seleciona o modelo correto por tarefa (summary vs script) e faz fallback em erro 402/429', async () => {
-    const calls: { models: string[]; url: string }[] = [];
-    const fakeFetch: typeof fetch = async (input, init) => {
-      const body = JSON.parse(String(init?.body ?? '{}')) as { models?: string[] };
-      calls.push({ models: body.models ?? [], url: String(input) });
-      if (calls.length === 1) {
+  it('tenta modelos em ordem serializada sem pular elementos e preserva usage/usedModel em generateStructuredWithMeta', async () => {
+    const requestedModels: string[] = [];
+    const fakeFetch: typeof fetch = async (_input, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { model?: string; models?: string[] };
+      const model = body.model ?? body.models?.[0] ?? '';
+      requestedModels.push(model);
+      if (requestedModels.length === 1) {
         return new Response(
           JSON.stringify({ error: { message: 'Insufficient credits', code: 402 } }),
           { status: 402 },
         );
       }
+      if (requestedModels.length === 2) {
+        return new Response(
+          JSON.stringify({ error: { message: 'Provider overloaded', code: 503 } }),
+          { status: 503 },
+        );
+      }
       return new Response(
         JSON.stringify({
-          choices: [{ message: { content: '{"ok":true,"modelUsed":"free-fallback"}' } }],
+          id: 'gen-123',
+          model: 'dots-studio/dots-3-note-preview:free',
+          usage: {
+            prompt_tokens: 120,
+            completion_tokens: 45,
+            total_tokens: 165,
+            cost: 0,
+          },
+          choices: [{ message: { content: '{"ok":true,"modelUsed":"dots-free"}' } }],
         }),
         { status: 200 },
       );
     };
 
+    const sleeps: number[] = [];
     const provider = new OpenRouterLlmProvider({
       apiKey: 'sk-or-v1-secret1234567890abcdef1234567890',
       summaryModel: 'google/gemini-3.5-flash-lite',
@@ -64,37 +80,101 @@ describe('OpenRouterLlmProvider & utilitários de protocolo', () => {
         'nvidia/nemotron-3-super-120b-a12b:free',
         'dots-studio/dots-3-note-preview:free',
         'liquid/lfm-2.5-2.6b:free',
-        'openrouter/free',
       ],
-      maxRetries: 1,
+      maxRetries: 0,
+      sleepImpl: async (ms) => {
+        sleeps.push(ms);
+      },
       fetchImpl: fakeFetch,
     });
 
     const schema = z.object({ ok: z.boolean(), modelUsed: z.string() });
-    const res = await provider.generateStructured('Teste de roteiro', schema, { task: 'script' });
+    const meta = await provider.generateStructuredWithMeta('Teste de roteiro', schema, {
+      task: 'script',
+    });
 
-    expect(res).toEqual({ ok: true, modelUsed: 'free-fallback' });
-    expect(calls).toHaveLength(2);
-    expect(calls[0]?.models[0]).toBe('anthropic/claude-haiku-5.5');
-    expect(calls[0]?.models.length).toBeLessThanOrEqual(3);
-    expect(calls[1]?.models).toEqual(['liquid/lfm-2.5-2.6b:free', 'openrouter/free']);
+    expect(meta.data).toEqual({ ok: true, modelUsed: 'dots-free' });
+    expect(meta.requestedModel).toBe('anthropic/claude-haiku-5.5');
+    expect(meta.usedModel).toBe('dots-studio/dots-3-note-preview:free');
+    expect(meta.degraded).toBe(true);
+    expect(meta.usage?.promptTokens).toBe(120);
+    expect(meta.usage?.completionTokens).toBe(45);
+    expect(meta.usage?.totalTokens).toBe(165);
+    expect(requestedModels).toEqual([
+      'anthropic/claude-haiku-5.5',
+      'nvidia/nemotron-3-super-120b-a12b:free',
+      'dots-studio/dots-3-note-preview:free',
+    ]);
   });
 
-  it('sanitiza a chave de API caso todas as tentativas falhem', async () => {
+  it('usa retry/backoff respeitando Retry-After em 429 sem timers reais e repara schema inválido em até 1 tentativa', async () => {
+    const sleeps: number[] = [];
+    let callCount = 0;
+    const fakeFetch: typeof fetch = async () => {
+      callCount++;
+      if (callCount === 1) {
+        return new Response('Rate limited', {
+          status: 429,
+          headers: { 'Retry-After': '2' },
+        });
+      }
+      if (callCount === 2) {
+        // JSON sintaticamente válido, mas fora do schema (count é string em vez de number)
+        return new Response(
+          JSON.stringify({
+            model: 'google/gemini-3.5-flash-lite',
+            choices: [{ message: { content: '{"title":"Cap 1","count":"tres"}' } }],
+          }),
+          { status: 200 },
+        );
+      }
+      // Tentativa de repair
+      return new Response(
+        JSON.stringify({
+          model: 'google/gemini-3.5-flash-lite',
+          choices: [{ message: { content: '{"title":"Cap 1","count":3}' } }],
+        }),
+        { status: 200 },
+      );
+    };
+
+    const provider = new OpenRouterLlmProvider({
+      apiKey: 'sk-or-v1-secret1234567890abcdef1234567890',
+      summaryModel: 'google/gemini-3.5-flash-lite',
+      fallbackModels: [],
+      maxRetries: 1,
+      sleepImpl: async (ms) => {
+        sleeps.push(ms);
+      },
+      fetchImpl: fakeFetch,
+    });
+
+    const schema = z.object({ title: z.string(), count: z.number() });
+    const res = await provider.generateStructured('Analise', schema, { task: 'summary' });
+    expect(res).toEqual({ title: 'Cap 1', count: 3 });
+    expect(sleeps[0]).toBeGreaterThanOrEqual(2000);
+    expect(callCount).toBe(3);
+  });
+
+  it('não tenta fallback em 401 e sanitiza a chave de API caso todas as tentativas falhem', async () => {
     const secretKey = `${'sk-or-v1'}-test_redaction_token_example_123456`;
-    const failingFetch: typeof fetch = async () =>
-      new Response(`Unauthorized key ${secretKey}`, { status: 401 });
+    let attempts = 0;
+    const failingFetch: typeof fetch = async () => {
+      attempts++;
+      return new Response(`Unauthorized key ${secretKey}`, { status: 401 });
+    };
 
     const provider = new OpenRouterLlmProvider({
       apiKey: secretKey,
       fallbackModels: ['openrouter/free'],
-      maxRetries: 0,
+      maxRetries: 2,
       fetchImpl: failingFetch,
     });
 
     await expect(
       provider.generateStructured('prompt', z.object({ a: z.string() })),
     ).rejects.toThrow(/\[REDACTED_KEY\]/);
+    expect(attempts).toBe(1);
   });
 });
 

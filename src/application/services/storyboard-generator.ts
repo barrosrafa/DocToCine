@@ -1,7 +1,37 @@
 import type { VideoScript } from '../../domain/schemas/script.schema.js';
 import type { ChapterBoundary } from '../../domain/schemas/chapter.schema.js';
 import { StoryboardSceneSchema, type StoryboardScene } from '../../domain/schemas/video.schema.js';
-export function createStoryboard(script: VideoScript, chapter: ChapterBoundary): StoryboardScene[] {
+import {
+  planVideoShots,
+  type ScenePlannerOptions,
+  type TimedSegmentInput,
+} from './scene-planner.js';
+
+export function createStoryboard(
+  script: VideoScript,
+  chapter: ChapterBoundary,
+  timedSegments?: TimedSegmentInput[],
+  options?: ScenePlannerOptions,
+): StoryboardScene[] {
+  if (timedSegments && timedSegments.length > 0) {
+    const plan = planVideoShots(script, timedSegments, options);
+    return plan.shots.map((shot) =>
+      StoryboardSceneSchema.parse({
+        sceneId: shot.shotId,
+        segmentIds: shot.sourceSegmentIds,
+        visualPrompt: shot.visualPrompt,
+        onScreenText: shot.onScreenText,
+        durationSeconds: Math.max(0.5, shot.endSeconds - shot.startSeconds),
+        sourcePages: shot.sourcePages.length
+          ? shot.sourcePages
+          : Array.from(
+              { length: chapter.endPage - chapter.startPage + 1 },
+              (_, n) => chapter.startPage + n,
+            ),
+      }),
+    );
+  }
+
   return script.segments.map((s, i) =>
     StoryboardSceneSchema.parse({
       sceneId: `scene_${String(i + 1).padStart(3, '0')}`,
