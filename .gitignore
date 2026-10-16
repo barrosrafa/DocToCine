@@ -1,0 +1,7 @@
+node_modules/
+typescript/node_modules/
+typescript/dist/
+typescript/coverage/
+typescript/.env
+*.partial.mp4
+*.tmp
