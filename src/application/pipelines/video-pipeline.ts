@@ -1,6 +1,7 @@
 import { mkdir, unlink, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { spawn } from 'node:child_process';
+import pLimit from 'p-limit';
 import type { ChapterBoundary } from '../../domain/schemas/chapter.schema.js';
 import type { VideoScript } from '../../domain/schemas/script.schema.js';
 import { ArtifactStore } from '../../infra/storage/artifact-store.js';
@@ -11,6 +12,8 @@ import { buildSrt } from '../../infra/media/srt-builder.js';
 import { FfmpegRenderer } from '../../infra/media/ffmpeg-renderer.js';
 import { checkVideo } from '../../infra/media/video-quality-checker.js';
 import { type VideoManifest } from '../../domain/schemas/video.schema.js';
+import type { TtsProvider } from '../../domain/ports/tts-provider.js';
+import type { SceneAssetProvider } from '../../domain/ports/scene-provider.js';
 
 function execProcess(cmd: string, args: string[]): Promise<void> {
   return new Promise((res, rej) => {
@@ -23,29 +26,37 @@ function execProcess(cmd: string, args: string[]): Promise<void> {
 }
 
 export class VideoPipeline {
+  private readonly sceneProvider: SceneAssetProvider;
+  private readonly ttsProvider: TtsProvider;
+
   constructor(
     readonly store: ArtifactStore,
     readonly width = 1280,
     readonly height = 720,
     readonly burnCaptions = true,
-  ) {}
+    sceneProvider?: SceneAssetProvider,
+    ttsProvider?: TtsProvider,
+  ) {
+    this.sceneProvider = sceneProvider ?? new SharpSceneProvider(this.width, this.height);
+    this.ttsProvider = ttsProvider ?? new FakeTtsProvider();
+  }
 
   async render(script: VideoScript, chapter: ChapterBoundary): Promise<string> {
     const dir = this.store.videoDir(chapter.number, script.durationMinutes);
     await mkdir(resolve(dir, 'scenes'), { recursive: true });
     await mkdir(resolve(dir, 'audio'), { recursive: true });
 
-    // 1. Generate storyboards
+    // 1. Generate storyboards & scene visuals with bounded concurrency
     const scenes = createStoryboard(script, chapter);
-    const provider = new SharpSceneProvider(this.width, this.height);
-    const paths: string[] = [];
-    for (const s of scenes) {
-      paths.push(await provider.create(s, resolve(dir, 'scenes', `${s.sceneId}.png`)));
-    }
+    const limit = pLimit(3);
+    const paths = await Promise.all(
+      scenes.map((s) =>
+        limit(() => this.sceneProvider.create(s, resolve(dir, 'scenes', `${s.sceneId}.png`))),
+      ),
+    );
 
     // 2. Synthesize audio per segment
-    const tts = new FakeTtsProvider();
-    const audio = await tts.synthesizeSegments(script.segments, resolve(dir, 'audio'));
+    const audio = await this.ttsProvider.synthesizeSegments(script.segments, resolve(dir, 'audio'));
 
     // 3. Align scene durations with real speech durations
     for (let i = 0; i < scenes.length; i++) {

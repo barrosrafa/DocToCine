@@ -1,525 +1,632 @@
 # DocToCine (lcBooks Pipeline)
 
-Pipeline em **TypeScript / Node.js 24 LTS** para conversão automatizada de documentos e livros em formato PDF em múltiplos formatos de roteiros e vídeos cinematográficos (MP4), com síntese de áudio, legendagem sincronizada (SRT), cartelas gráficas visuais e controle rigoroso de qualidade.
+Pipeline multimodal em **TypeScript 5.9 / Node.js 24 LTS** para conversão automatizada de documentos e livros em formato PDF em pacotes editoriais estruturados, roteiros de múltiplas durações (`1`, `3` e `20` minutos) e vídeos cinematográficos (`MP4` H.264/AAC), integrando o ecossistema **OpenRouter (`https://openrouter.ai/api/v1`)** com seleção de modelo especializado por atividade, geração de ilustrações de cenas por IA composta via **Sharp (SVG/PNG)**, síntese neural de voz (TTS) com alinhamento temporal por segmento, legendagem sincronizada (**SRT**) e auditoria automatizada de qualidade (**FFmpeg / FFprobe**).
 
-O projeto adota princípios de **Clean Architecture** e **Arquitetura Hexagonal (Ports & Adapters)**, desacoplando completamente as regras de domínio e os fluxos da aplicação dos adaptadores de infraestrutura (leitura de PDF, renderização gráfica, FFmpeg, TTS e persistência de arquivos).
+O projeto adota **Clean Architecture** e **Arquitetura Hexagonal (Ports & Adapters)**, mantendo o núcleo de domínio e os casos de uso 100% desacoplados dos adaptadores de infraestrutura (OpenRouter HTTP/JSON/Image/Audio, PDF.js, Sharp, FFmpeg e persistência atômica em disco).
 
 ---
 
 ## Sumário
 
-- [Visão Geral da Arquitetura](#visão-geral-da-arquitetura)
-- [Estrutura do Repositório](#estrutura-do-repositório)
-- [Detalhamento Aprofundado de Cada Código](#detalhamento-aprofundado-de-cada-código)
-  - [1. Ponto de Entrada e Interface de Linha de Comando (CLI)](#1-ponto-de-entrada-e-interface-de-linha-de-comando-cli)
-  - [2. Configuração e Núcleo (Core)](#2-configuração-e-núcleo-core)
-  - [3. Camada de Domínio (Domain)](#3-camada-de-domínio-domain)
-  - [4. Camada de Aplicação (Application & Pipelines)](#4-camada-de-aplicação-application--pipelines)
-  - [5. Camada de Infraestrutura (Infrastructure & Adapters)](#5-camada-de-infraestrutura-infrastructure--adapters)
-  - [6. Testes Unitários](#6-testes-unitários)
-  - [7. Arquivos de Configuração do Ecossistema](#7-arquivos-de-configuração-do-ecossistema)
-- [Fluxo de Execução do Pipeline Ponta a Ponta](#fluxo-de-execução-do-pipeline-ponta-a-ponta)
-- [Estrutura de Artefatos Gerados](#estrutura-de-artefatos-gerados)
-- [Instalação, Configuração e Execução](#instalação-configuração-e-execução)
-- [Práticas de Confiabilidade e Segurança](#práticas-de-confiabilidade-e-segurança)
+- [1. Visão Geral da Arquitetura](#1-visão-geral-da-arquitetura)
+- [2. Roteamento Multimodal por Atividade no OpenRouter](#2-roteamento-multimodal-por-atividade-no-openrouter)
+  - [2.1 Matriz de Modelos por Tarefa e Cadeias de Failover](#21-matriz-de-modelos-por-tarefa-e-cadeias-de-failover)
+  - [2.2 Algoritmo de Multi-Batch Failover e Resiliência HTTP](#22-algoritmo-de-multi-batch-failover-e-resiliência-http)
+- [3. Estrutura Completa do Repositório](#3-estrutura-completa-do-repositório)
+- [4. Detalhamento Aprofundado de Cada Código (Arquivo por Arquivo)](#4-detalhamento-aprofundado-de-cada-código-arquivo-por-arquivo)
+  - [4.1 Ponto de Entrada e CLI (`src/main.ts`, `src/cli/build-cli.ts`)](#41-ponto-de-entrada-e-cli-srcmaints-srcclibuild-clits)
+  - [4.2 Configuração, Erros e Segurança (`src/config/`, `src/core/`)](#42-configuração-erros-e-segurança-srcconfig-srccore)
+  - [4.3 Camada de Domínio: Portas e Schemas (`src/domain/`)](#43-camada-de-domínio-portas-e-schemas-srcdomain)
+  - [4.4 Camada de Aplicação: Serviços e Pipelines (`src/application/`)](#44-camada-de-aplicação-serviços-e-pipelines-srcapplication)
+  - [4.5 Camada de Infraestrutura e Adaptadores (`src/infra/`)](#45-camada-de-infraestrutura-e-adaptadores-srcinfra)
+  - [4.6 Suítes de Testes Automatizados (`tests/unit/`)](#46-suítes-de-testes-automatizados-testsunit)
+  - [4.7 Configurações do Ecossistema e CI/CD](#47-configurações-do-ecossistema-e-cicd)
+- [5. Fluxo de Execução Ponta a Ponta (End-to-End Lifecycle)](#5-fluxo-de-execução-ponta-a-ponta-end-to-end-lifecycle)
+  - [5.1 Diagrama de Sequência Completo](#51-diagrama-de-sequência-completo)
+  - [5.2 Passo a Passo Técnico da Execução](#52-passo-a-passo-técnico-da-execução)
+  - [5.3 Máquina de Estados Finitos do Vídeo](#53-máquina-de-estados-finitos-do-vídeo)
+- [6. Estrutura de Artefatos Gerados e Contratos JSON](#6-estrutura-de-artefatos-gerados-e-contratos-json)
+- [7. Instalação, Configuração e Execução](#7-instalação-configuração-e-execução)
+- [8. Engenharia de Segurança, Desempenho e Boas Práticas](#8-engenharia-de-segurança-desempenho-e-boas-práticas)
 
 ---
 
-## Visão Geral da Arquitetura
+## 1. Visão Geral da Arquitetura
 
-O sistema organiza-se em camadas estritamente tipadas e com contratos explícitos validados em tempo de execução através do **Zod**:
+O sistema é dividido em 4 anéis concêntricos estritamente tipados e validados em tempo de execução com **Zod 4**:
+
+1. **Domínio (`src/domain/`)**: Contratos imutáveis, schemas de validação, normalizadores de dados e portas de abstração (`LlmProvider`, `TtsProvider`, `SceneAssetProvider`). Não depende de nenhuma biblioteca externa além do `zod`.
+2. **Aplicação (`src/application/`)**: Casos de uso e orquestradores (`BookPipeline`, `VideoPipeline`, `ScriptGenerator`, `chapter-detector`, `storyboard-generator`). Coordena o fluxo de trabalho através das portas do domínio e controla paralelismo com `p-limit`.
+3. **Infraestrutura (`src/infra/`)**: Implementações concretas das portas para o ecossistema **OpenRouter** (`OpenRouterLlmProvider`, `OpenRouterTtsProvider`, `OpenRouterSceneProvider`), motores locais de contingência (`FakeTtsProvider`, `SharpSceneProvider`), extração PDF (`pdfjs-dist`), legendagem (`srt-builder`), renderização (`FfmpegRenderer`), auditoria (`video-quality-checker`) e persistência transacional (`ArtifactStore`).
+4. **Configuração, Core & CLI (`src/main.ts`, `src/cli/`, `src/config/`, `src/core/`)**: Composição de dependências (Dependency Injection Root), parsing de argumentos CLI via `commander`, validação de ambiente e sanitização contra vazamento de segredos.
 
 ```mermaid
 flowchart TD
-    CLI["CLI / Ponto de Entrada (src/main.ts, src/cli/build-cli.ts)"] --> Settings["Configurações & Validação (src/config/settings.ts)"]
-    CLI --> BookPipe["BookPipeline (src/application/pipelines/book-pipeline.ts)"]
+    CLI["CLI & Composition Root\n(src/main.ts, src/cli/build-cli.ts)"] --> Settings["Configuração & Validação Zod\n(src/config/settings.ts)"]
+    CLI --> BookPipe["BookPipeline\n(src/application/pipelines/book-pipeline.ts)"]
 
-    subgraph Aplicação ["Aplicação & Serviços"]
-        BookPipe --> PDFExt["Extrator PDF (src/infra/pdf/pdf-extractor.ts)"]
-        BookPipe --> ScriptGen["ScriptGenerator (src/application/services/script-generator.ts)"]
-        BookPipe --> VideoPipe["VideoPipeline (src/application/pipelines/video-pipeline.ts)"]
-        VideoPipe --> Storyboard["createStoryboard (src/application/services/storyboard-generator.ts)"]
+    subgraph Core ["Núcleo Transversal (src/core)"]
+        AppErr["AppError & Taxonomia\n(core/errors/app-error.ts)"]
+        Redact["Sanitizador de Segredos sk-or-v1\n(core/logging/redact.ts)"]
     end
 
-    subgraph Domínio ["Contratos e Schemas Zod (src/domain)"]
-        ChapterSchema["chapter.schema.ts"]
-        ScriptSchema["script.schema.ts"]
-        VideoSchema["video.schema.ts"]
-        LLMPort["ports/llm-provider.ts"]
+    subgraph Aplicacao ["Camada de Aplicação (src/application)"]
+        BookPipe --> ChapDet["Detector de Capítulos\n(services/chapter-detector.ts)"]
+        BookPipe --> ScriptGen["ScriptGenerator (p-limit)\n(services/script-generator.ts)"]
+        BookPipe --> VideoPipe["VideoPipeline\n(pipelines/video-pipeline.ts)"]
+        VideoPipe --> Storyboard["createStoryboard\n(services/storyboard-generator.ts)"]
     end
 
-    subgraph Infraestrutura ["Infraestrutura & Mídia (src/infra)"]
-        Store["ArtifactStore (storage/artifact-store.ts)"]
-        TTS["FakeTtsProvider (tts/fake-tts-provider.ts)"]
-        SRT["SRT Builder (media/srt-builder.ts)"]
-        SceneProvider["SharpSceneProvider (media/sharp-scene-provider.ts)"]
-        Renderer["FfmpegRenderer (media/ffmpeg-renderer.ts)"]
-        Quality["VideoQualityChecker (media/video-quality-checker.ts)"]
+    subgraph Dominio ["Camada de Domínio: Portas & Schemas (src/domain)"]
+        LLMPort["Port: LlmProvider\n(ports/llm-provider.ts)"]
+        TTSPort["Port: TtsProvider\n(ports/tts-provider.ts)"]
+        ScenePort["Port: SceneAssetProvider\n(ports/scene-provider.ts)"]
+        Schemas["Schemas Zod\n(chapter, script, video)"]
     end
 
-    BookPipe -.-> Domínio
-    VideoPipe -.-> Domínio
-    VideoPipe --> SceneProvider
-    VideoPipe --> TTS
+    subgraph Infra ["Camada de Infraestrutura & OpenRouter (src/infra)"]
+        PDFExt["Extrator PDF (pdfjs-dist)\n(pdf/pdf-extractor.ts)"]
+        ORLLM["OpenRouterLlmProvider\n(llm/openrouter-provider.ts)"]
+        ORTTS["OpenRouterTtsProvider\n(tts/openrouter-tts-provider.ts)"]
+        FakeTTS["FakeTtsProvider (say/WAV)\n(tts/fake-tts-provider.ts)"]
+        ORScene["OpenRouterSceneProvider\n(media/openrouter-scene-provider.ts)"]
+        SharpScene["SharpSceneProvider (SVG+PNG)\n(media/sharp-scene-provider.ts)"]
+        SRT["SRT Builder\n(media/srt-builder.ts)"]
+        FFmpeg["FfmpegRenderer (H.264/AAC)\n(media/ffmpeg-renderer.ts)"]
+        Probe["VideoQualityChecker (ffprobe)\n(media/video-quality-checker.ts)"]
+        Store["ArtifactStore (I/O Atômico)\n(storage/artifact-store.ts)"]
+    end
+
+    BookPipe --> PDFExt
+    BookPipe --> LLMPort
+    ScriptGen --> LLMPort
+    VideoPipe --> ScenePort
+    VideoPipe --> TTSPort
     VideoPipe --> SRT
-    VideoPipe --> Renderer
-    VideoPipe --> Quality
+    VideoPipe --> FFmpeg
+    VideoPipe --> Probe
     BookPipe --> Store
+    VideoPipe --> Store
+
+    LLMPort -.-> ORLLM
+    TTSPort -.-> ORTTS
+    ORTTS -->|Fallback 402/Offline| FakeTTS
+    ScenePort -.-> ORScene
+    ORScene -->|Composição & Fallback| SharpScene
+    ORLLM --> Redact
 ```
 
 ---
 
-## Estrutura do Repositório
+## 2. Roteamento Multimodal por Atividade no OpenRouter
 
-Após a reorganização e remoção da pasta intermediária `typescript/`, todos os arquivos e comandos passam a operar a partir da raiz do repositório:
+Em vez de utilizar um único modelo monolítico para tarefas com exigências cognitivas e multimodais distintas, o DocToCine implementa roteamento especializado por tarefa através da porta [`LlmProvider`](file:///Users/rafaelaparecido/Documents/DocToCine/src/domain/ports/llm-provider.ts), [`TtsProvider`](file:///Users/rafaelaparecido/Documents/DocToCine/src/domain/ports/tts-provider.ts) e [`SceneAssetProvider`](file:///Users/rafaelaparecido/Documents/DocToCine/src/domain/ports/scene-provider.ts).
+
+### 2.1 Matriz de Modelos por Tarefa e Cadeias de Failover
+
+| Atividade / Função                                                | Porta / Serviço                                  | Variável de Ambiente          | Modelo Primário (OpenRouter)         | Cadeia de Fallback Automático (Free Tier / Local)                                                                                                                  | Por que este modelo foi selecionado                                                                                                                                                                                                                |
+| :---------------------------------------------------------------- | :----------------------------------------------- | :---------------------------- | :----------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **1. Análise Literária e Resumo de Capítulos (`summary`)**        | `LlmProvider` (`task: 'summary'`)                | `OPENROUTER_SUMMARY_MODEL`    | `google/gemini-3.5-flash-lite`       | `nvidia/nemotron-3-super-120b-a12b:free` ➔ `dots-studio/dots-3-note-preview:free` ➔ `liquid/lfm-2.5-2.6b:free` ➔ `openrouter/free` ➔ Extração determinística local | Ampla janela de contexto para processar páginas extraídas do PDF (`MAX_CHAPTER_CHARS_PER_CHUNK`), baixa latência, temperatura reduzida (`0.2`) para fidelidade factual e suporte nativo a JSON estruturado.                                        |
+| **2. Roteirização Cinematográfica 1, 3 e 20 min (`script`)**      | `LlmProvider` (`task: 'script'`)                 | `OPENROUTER_SCRIPT_MODEL`     | `anthropic/claude-haiku-5.5`         | `nvidia/nemotron-3-super-120b-a12b:free` ➔ `dots-studio/dots-3-note-preview:free` ➔ `liquid/lfm-2.5-2.6b:free` ➔ `openrouter/free` ➔ `generateDeterministic`       | Escrita criativa superior em Português (`pt-BR`), ritmo dramático de audiolivro, temperatura calibrada (`0.6`) e cumprimento rigoroso de metas de parágrafos e contagem de palavras.                                                               |
+| **3. Direção de Storyboard (`storyboard`)**                       | `LlmProvider` (`task: 'storyboard'`)             | `OPENROUTER_STORYBOARD_MODEL` | `google/gemini-3.5-flash-lite`       | Cadeia `OPENROUTER_FALLBACK_MODELS`                                                                                                                                | Estruturação rápida de metadados visuais e decupagem técnica de cenas.                                                                                                                                                                             |
+| **4. Geração de Ilustrações de Cenas para Vídeo (`scene_image`)** | `SceneAssetProvider` (`OpenRouterSceneProvider`) | `OPENROUTER_IMAGE_MODEL`      | `google/gemini-3.1-flash-lite-image` | `openai/gpt-5-image-mini` ➔ Fallback vetorial local em `SharpSceneProvider` (SVG/PNG gradiente)                                                                    | Usa a modalidade nativa `modalities: ['image', 'text']` do OpenRouter (Nano Banana 2 Lite) com `image_config.aspect_ratio` (`16:9` ou `9:16`), compondo a arte gerada por IA com tipografia vetorial e barra de progresso no `SharpSceneProvider`. |
+| **5. Síntese Neural de Voz / Narração (`audio`)**                 | `TtsProvider` (`OpenRouterTtsProvider`)          | `OPENROUTER_AUDIO_MODEL`      | `openai/gpt-audio-mini`              | `openai/gpt-audio` ➔ Fallback local em `FakeTtsProvider` (`say -v Luciana` macOS + `ffmpeg` MP3 ou WAV harmônico PCM)                                              | Usa a modalidade nativa `modalities: ['text', 'audio']` com `audio: { voice: 'nova', format: 'mp3' }` para narração expressiva em português, medindo a duração exata com `ffprobe`.                                                                |
+
+### 2.2 Algoritmo de Multi-Batch Failover e Resiliência HTTP
+
+A API do OpenRouter (`POST /api/v1/chat/completions`) impõe a restrição estrita de **no máximo 3 modelos** no array `models` por requisição HTTP (`'models' array must have 3 items or fewer`). Para superar esse limite e permitir cadeias longas de contingência (combinando modelos pagos de ponta e múltiplos modelos `:free`), o [`OpenRouterLlmProvider`](file:///Users/rafaelaparecido/Documents/DocToCine/src/infra/llm/openrouter-provider.ts) implementa:
+
+1. **Particionamento em Lotes (`buildModelBatches`)**: Remove duplicatas da lista `[primaryModel, ...fallbackModels]` e fatia os candidatos em sub-arrays de até 3 modelos cada.
+2. **Failover Híbrido (Server-Side + Client-Side)**:
+   - Dentro de cada lote de até 3 modelos, o próprio roteador do OpenRouter realiza failover instantâneo no servidor.
+   - Se o lote retornar `HTTP 402` (saldo insuficiente para modelos pagos na conta), o cliente avança **imediatamente** (`break`) para o próximo lote (composto pelos modelos `:free`), sem desperdiçar tempo em retentativas no mesmo lote.
+   - Se o lote retornar status transiente (`408`, `429`, `500`, `502`, `503`, `504`), aplica **Exponential Backoff com Jitter** (`Math.min(2000, 150 * 2^attempt) + random(0..50)ms`) até `maxRetries` antes de tentar o próximo lote.
+   - Se retornar `401` ou `403` (credencial inválida), aborta imediatamente lançando `AppError` com `code: 'LLM_AUTH'` e `retryable: false`.
+3. **Higienização e Extração Defensiva de JSON (`extractJsonPayload`)**:
+   - Modelos de raciocínio e modelos `:free` frequentemente envolvem a resposta em tags `<think>...</think>`, blocos Markdown ` ```json ... ``` ` ou comentários introdutórios.
+   - A função `extractJsonPayload(raw)` remove blocos `<think>`, tenta `JSON.parse` direto, extrai blocos cercados por crases e, em último caso, localiza o primeiro `{` e o último `}` balanceados antes de entregar o objeto ao parser estrito do Zod (`schema.parse(json)`).
+
+---
+
+## 3. Estrutura Completa do Repositório
 
 ```text
 DocToCine/
 ├── .github/
 │   └── workflows/
-│       └── ci.yml                # Pipeline de Integração Contínua (GitHub Actions)
+│       └── ci.yml                           # Pipeline de Integração Contínua (GitHub Actions - Node 24)
 ├── src/
-│   ├── main.ts                   # Ponto de entrada executável da CLI lcbooks
+│   ├── main.ts                              # Ponto de entrada executável da CLI lcbooks e injeção de dependências
 │   ├── cli/
-│   │   └── build-cli.ts          # Definição de argumentos e opções com Commander
+│   │   └── build-cli.ts                     # Definição declarativa de argumentos e flags via Commander
 │   ├── config/
-│   │   └── settings.ts           # Validação de variáveis de ambiente com Zod
+│   │   └── settings.ts                      # Validação Zod de variáveis de ambiente e modelos OpenRouter
 │   ├── core/
 │   │   ├── errors/
-│   │   │   └── app-error.ts      # Hierarquia e taxonomia padronizada de erros
+│   │   │   └── app-error.ts                 # Classe AppError, ErrorStage, ErrorCode e helper asError
 │   │   └── logging/
-│   │       └── redact.ts         # Sanitização de tokens e segredos em logs/mensagens
+│   │       └── redact.ts                    # Sanitização de chaves (sk-or-v1-*, sk-*, AIza*, ya29*)
 │   ├── domain/
 │   │   ├── ports/
-│   │   │   └── llm-provider.ts   # Interface de abstração (port) para provedores de LLM
+│   │   │   ├── llm-provider.ts              # Porta LlmProvider com roteamento por LlmTaskType
+│   │   │   ├── tts-provider.ts              # Porta TtsProvider e contrato TimedSpeech
+│   │   │   └── scene-provider.ts            # Porta SceneAssetProvider para geração de imagens de cenas
 │   │   └── schemas/
-│   │       ├── chapter.schema.ts # Schemas de capítulos, limites, teses e evidências
-│   │       ├── script.schema.ts  # Schemas de roteiros, durações (1, 3, 20m) e segmentos
-│   │       └── video.schema.ts   # Máquina de estados, storyboard e relatórios de qualidade
+│   │       ├── chapter.schema.ts            # Schemas Zod de limites, mapas, resumos e pacotes de capítulos
+│   │       ├── script.schema.ts             # Schemas Zod de roteiros (1, 3, 20m) e segmentação automática
+│   │       └── video.schema.ts              # Máquina de estados do vídeo, storyboard, manifesto e quality report
 │   ├── application/
 │   │   ├── services/
-│   │   │   ├── chapter-detector.ts      # Detecção e validação de limites de capítulos
-│   │   │   ├── script-generator.ts      # Geração de roteiros (estruturado LLM ou determinístico)
-│   │   │   └── storyboard-generator.ts  # Criação de cenas e estimativa de tempo
+│   │   │   ├── chapter-detector.ts          # Heurísticas regex de detecção e normalização de capítulos
+│   │   │   ├── script-generator.ts          # Gerador de roteiros via LLM (task: 'script') + fallback determinístico
+│   │   │   └── storyboard-generator.ts      # Conversão de segmentos em cenas visuais com cálculo temporal
 │   │   └── pipelines/
-│   │       ├── book-pipeline.ts  # Orquestração ponta a ponta do processamento do livro
-│   │       └── video-pipeline.ts # Pipeline de renderização de vídeo e assets multimídia
+│   │       ├── book-pipeline.ts             # Orquestrador mestre: PDF -> Capítulos -> Resumos -> Roteiros -> Vídeos
+│   │       └── video-pipeline.ts            # Orquestrador multimídia: Cenas -> TTS -> FFmpeg Concat -> SRT -> MP4 -> QA
 │   └── infra/
+│       ├── llm/
+│       │   └── openrouter-provider.ts       # Adaptador OpenRouterLlmProvider, buildModelBatches e extractJsonPayload
 │       ├── pdf/
-│       │   └── pdf-extractor.ts         # Extração segura e validação de texto de PDF
+│       │   └── pdf-extractor.ts             # Extração de texto PDF via pdfjs-dist com limites de segurança
 │       ├── storage/
-│       │   └── artifact-store.ts        # Operações atômicas de I/O em disco e persistência
+│       │   └── artifact-store.ts            # Persistência atômica (.tmp -> rename), SHA-256 e proteção path traversal
 │       ├── tts/
-│       │   └── fake-tts-provider.ts     # Síntese determinística de áudio WAV (zero-cost)
+│       │   ├── openrouter-tts-provider.ts   # Síntese neural via OpenRouter (openai/gpt-audio-mini) + ffprobe
+│       │   └── fake-tts-provider.ts         # Síntese local (macOS say Luciana -> MP3 + gerador WAV PCM 8kHz)
 │       └── media/
-│           ├── srt-builder.ts           # Geração e parsing de legendas SRT sincronizadas
-│           ├── sharp-scene-provider.ts  # Geração de imagens das cenas com gradientes via Sharp
-│           ├── ffmpeg-renderer.ts       # Renderização de vídeo com FFmpeg (processo seguro)
-│           └── video-quality-checker.ts # Verificação de conformidade técnica via ffprobe
+│           ├── openrouter-scene-provider.ts # Geração de ilustrações via OpenRouter (gemini-3.1-flash-lite-image)
+│           ├── sharp-scene-provider.ts      # Composição de cenas SVG + background IA para PNG via Sharp
+│           ├── srt-builder.ts               # Construção proporcional e parser verificador de legendas SubRip (.srt)
+│           ├── ffmpeg-renderer.ts           # Renderizador seguro (shell: false) de vídeo H.264/AAC com burn-in SRT
+│           └── video-quality-checker.ts     # Auditoria técnica de streams, resolução e codecs via ffprobe
 ├── tests/
 │   └── unit/
-│       └── domain.test.ts        # Suíte de testes unitários com Vitest
-├── .env.example                  # Modelo de variáveis de ambiente
-├── .gitignore                    # Regras de exclusão do Git
-├── .prettierignore               # Exclusões para o formatador Prettier
-├── .prettierrc.json              # Configurações do Prettier
-├── eslint.config.js              # Configuração do ESLint 9 (Flat Config) com TypeScript
-├── package.json                  # Dependências, scripts e metadados do pacote
-├── package-lock.json             # Árvore exata de dependências
-├── tsconfig.json                 # Configuração principal do compilador TypeScript
-├── tsconfig.build.json           # Configuração de compilação para distribuição (dist/)
-├── vitest.config.ts              # Configuração do executor de testes Vitest
-└── README.md                     # Esta documentação completa e aprofundada
+│       ├── domain.test.ts                   # Testes unitários de schemas, máquina de estados, redact e settings
+│       └── openrouter.test.ts               # Testes unitários do OpenRouter (LLM, batches, 402 fallback, TTS e Scene)
+├── .env.example                             # Template seguro de variáveis de ambiente (sem chaves reais)
+├── .gitignore                               # Exclusões do Git (.env, node_modules, dist, saida*, *.tmp)
+├── .prettierignore                          # Exclusões de formatação Prettier
+├── .prettierrc.json                         # Regras de estilo Prettier
+├── eslint.config.js                         # Configuração ESLint 9 Flat Config + typescript-eslint
+├── package.json                             # Manifesto NPM, scripts de ciclo de vida e dependências enxutas
+├── tsconfig.json                            # Configuração TypeScript estrita para desenvolvimento e typecheck
+├── tsconfig.build.json                      # Configuração TypeScript para build de produção em dist/
+├── vitest.config.ts                         # Configuração da suíte de testes Vitest e cobertura V8
+└── README.md                                # Documentação arquitetural e técnica completa
 ```
 
 ---
 
-## Detalhamento Aprofundado de Cada Código
+## 4. Detalhamento Aprofundado de Cada Código (Arquivo por Arquivo)
 
-Abaixo está a análise minuciosa de cada arquivo do projeto, explicando sua finalidade, dependências, funções exportadas e detalhes de implementação.
-
----
-
-### 1. Ponto de Entrada e Interface de Linha de Comando (CLI)
+### 4.1 Ponto de Entrada e CLI (`src/main.ts`, `src/cli/build-cli.ts`)
 
 #### [`src/main.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/main.ts)
 
-- **Papel:** Ponto de entrada da CLI (`#!/usr/bin/env node`).
-- **Principais responsabilidades:**
-  - Instancia e processa os argumentos de linha de comando através de `buildCli()`.
-  - Normaliza os parâmetros fornecidos pelo usuário: caminho do PDF de entrada, diretório de saída (resolvido de forma absoluta com `path.resolve`), lista de durações (validando estritamente os valores `1`, `3` ou `20` minutos) e número esperado de capítulos.
-  - Instancia o `ArtifactStore` para gerenciar a persistência em disco.
-  - Dispara a execução do `BookPipeline` e aguarda sua conclusão.
-  - Emite no `stdout` um relatório resumido em JSON com os caminhos, capítulos gerados, quantidade de vídeos e lista de falhas.
-  - Retorna códigos de saída semânticos do processo:
-    - `0`: Sucesso total (todos os artefatos foram gerados com êxito).
-    - `1`: Erro fatal de execução/configuração (capturado pelo bloco `catch`).
-    - `2`: Conclusão parcial com artefatos pendentes ou com falha.
-  - Possui o gatilho `if (import.meta.url === file://${process.argv[1]}) run()` que permite ser executado diretamente ou importado como módulo em testes.
+- **Responsabilidade:** Ponto de entrada executável (`#!/usr/bin/env node`) e **Composition Root** (Injeção de Dependências).
+- **Fluxo Interno da Função `run(argv)`:**
+  1. Invoca `buildCli().parse(argv)` para extrair o argumento posicional `<pdf>` e as opções `--output`, `--chapters`, `--durations`, `--render-videos` e `--aspect-ratio`.
+  2. Carrega e valida todas as variáveis de ambiente através de `loadSettings()`.
+  3. Faz o parsing da flag `--durations` (ex.: `'1,3,20'`), filtrando estritamente os valores permitidos pelo tipo literal `1 | 3 | 20`. Caso nenhuma duração válida seja informada, lança erro imediato.
+  4. Calcula a resolução alvo `[width, height]`:
+     - Para `16:9` (padrão): `[VIDEO_WIDTH, VIDEO_HEIGHT]` (`1920x1080`).
+     - Para `9:16` (vertical/Reels/Shorts/TikTok): inverte automaticamente para `[VIDEO_HEIGHT, VIDEO_WIDTH]` (`1080x1920`).
+  5. **Injeção de Provedores Multimodais**:
+     - `sceneProvider`: Se `SCENE_PROVIDER === 'openrouter'` e `OPENROUTER_API_KEY` estiver definida, instancia [`OpenRouterSceneProvider`](file:///Users/rafaelaparecido/Documents/DocToCine/src/infra/media/openrouter-scene-provider.ts); caso contrário, instancia [`SharpSceneProvider`](file:///Users/rafaelaparecido/Documents/DocToCine/src/infra/media/sharp-scene-provider.ts).
+     - `ttsProvider`: Se `TTS_PROVIDER === 'openrouter'` e `OPENROUTER_API_KEY` estiver definida, instancia [`OpenRouterTtsProvider`](file:///Users/rafaelaparecido/Documents/DocToCine/src/infra/tts/openrouter-tts-provider.ts); caso contrário, instancia [`FakeTtsProvider`](file:///Users/rafaelaparecido/Documents/DocToCine/src/infra/tts/fake-tts-provider.ts).
+     - `llm`: Se `OPENROUTER_API_KEY` estiver presente, instancia [`OpenRouterLlmProvider`](file:///Users/rafaelaparecido/Documents/DocToCine/src/infra/llm/openrouter-provider.ts) com os modelos dedicados para `summaryModel`, `scriptModel`, `storyboardModel` e `fallbackModels`.
+  6. Executa `BookPipeline.run(...)`, imprime no `stdout` o sumário JSON (`output`, `chapters`, `videos`, `failed`) e retorna códigos de saída POSIX semânticos:
+     - `0`: Execução 100% concluída sem falhas.
+     - `1`: Erro fatal de configuração, entrada ou leitura de PDF.
+     - `2`: Execução concluída parcialmente (`failedArtifacts.length > 0`).
 
 #### [`src/cli/build-cli.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/cli/build-cli.ts)
 
-- **Papel:** Configuração declarativa da interface CLI via `commander`.
-- **Principais responsabilidades:**
-  - Define o nome do binário (`lcbooks`) e sua descrição operacional.
-  - Configura o argumento obrigatório `<pdf>` representando o arquivo fonte.
-  - Configura as opções (flags):
-    - `-o, --output <dir>`: Diretório de destino dos artefatos (padrão: `saida`).
-    - `-c, --chapters <n>`: Quantidade esperada de capítulos (padrão: `1`).
-    - `-d, --durations <list>`: Lista delimitada por vírgulas com as durações desejadas (`1,3,20`).
-    - `--render-videos`: Flag booleana indicando se os vídeos MP4 devem ser renderizados via FFmpeg ou se o pipeline deve parar na geração de roteiros e metadados.
-    - `--resume`: Permite retomar execuções reaproveitando artefatos válidos já persistidos.
-    - `--force`: Força a regeneração de todos os artefatos ignorando caches prévios.
-    - `--continue-on-error`: Continua o processamento dos próximos capítulos mesmo se um falhar.
-    - `--aspect-ratio <ratio>`: Seleciona o formato de vídeo (`16:9` widescreen ou `9:16` vertical/reels/shorts).
-    - `-v, --verbose`: Ativa registros detalhados de execução.
+- **Responsabilidade:** Declaração da interface de linha de comando com `commander`.
+- **Flags Suportadas:**
+  - `<pdf>`: Caminho do arquivo PDF de entrada (obrigatório).
+  - `-o, --output <dir>`: Diretório base de saída (padrão: `'saida'`).
+  - `-c, --chapters <n>`: Quantidade esperada de capítulos (padrão: `'1'`).
+  - `-d, --durations <list>`: Lista separada por vírgulas de durações em minutos (padrão: `'1,3,20'`).
+  - `--render-videos`: Ativa a pipeline completa de mídia (imagens, áudio, legendas e renderização MP4).
+  - `--resume`, `--force`, `--continue-on-error`, `--aspect-ratio <ratio>` (`16:9` ou `9:16`), `-v, --verbose`.
 
 ---
 
-### 2. Configuração e Núcleo (Core)
+### 4.2 Configuração, Erros e Segurança (`src/config/`, `src/core/`)
 
 #### [`src/config/settings.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/config/settings.ts)
 
-- **Papel:** Carregamento centralizado e validação estrita de configurações do sistema.
-- **Principais responsabilidades:**
-  - Carrega automaticamente o arquivo `.env` via `dotenv/config`.
-  - Constrói o `EnvSchema` via Zod com validações e valores padrão seguros:
-    - `GEMINI_API_KEY` / `GOOGLE_API_KEY`: Chaves de autenticação com tratamento para strings vazias via preprocessador (`optionalSecret`).
-    - `GEMINI_MODEL`: Modelo da LLM a ser utilizado (padrão: `gemini-2.5-flash`).
-    - `TTS_PROVIDER`: Provedor de síntese de voz (`google_cloud` ou `fake`, padrão `fake`).
-    - `TTS_LANGUAGE` / `TTS_VOICE` / `TTS_SPEAKING_RATE`: Configurações de áudio pt-BR.
-    - `VIDEO_WIDTH` / `VIDEO_HEIGHT`: Resolução do vídeo (padrão: `1920x1080`).
-    - `VIDEO_FPS`: Taxa de quadros (padrão: `30`).
-    - `VIDEO_CRF`: Fator de taxa constante para o codec H.264 (padrão: `20`).
-    - `VIDEO_PRESET`: Preset de velocidade/compressão do x264 (padrão: `medium`).
-    - `BURN_CAPTIONS`: Booleano para gravação de legendas diretamente no vídeo.
-    - `MAX_PDF_MB` / `MAX_PDF_PAGES`: Limites de segurança para evitar estouro de memória em PDFs massivos (padrão: `100MB` e `1000` páginas).
-    - `MAX_CHAPTER_CHARS_PER_CHUNK`: Tamanho máximo do chunk de texto por capítulo (padrão: `12.000` caracteres).
-    - `MAX_RETRY_ATTEMPTS`: Tentativas máximas de reexecução em falhas recuperáveis (padrão: `3`).
-  - Funções utilitárias:
-    - `loadSettings(env)`: Valida e retorna as configurações tipadas, lançando erro detalhado em caso de divergência.
-    - `requireGemini(settings)`: Garante que uma chave de API válida esteja presente quando requisições reais forem feitas à API do Gemini.
-    - `publicSettings(settings)`: Retorna uma cópia do objeto de configurações removendo chaves sensíveis para exibição segura em logs e relatórios.
+- **Responsabilidade:** Carregamento (`dotenv/config`) e validação rigorosa de variáveis de ambiente com `Zod`.
+- **Validadores Customizados:**
+  - `optionalSecret`: Converte strings vazias ou contendo apenas espaços (`""`, `"   "`) em `undefined` antes de validar `z.string().min(1).optional()`, evitando que chaves em branco no `.env` sejam tratadas como tokens válidos.
+  - `secureBaseUrl`: Garante que `OPENROUTER_BASE_URL` seja uma URL válida e utilize obrigatoriamente o protocolo `https:` (permitindo `http://localhost` ou `http://127.0.0.1` exclusivamente para servidores de mock em testes locais), prevenindo envio acidental do token `Bearer` em texto claro pela rede.
+  - `fallbackModelsSchema`: Aceita tanto um array de strings quanto uma string delimitada por vírgulas no `.env` e converte em um array higienizado de IDs de modelos do OpenRouter.
+- **Funções Exportadas:**
+  - `loadSettings(env)`: Retorna o objeto `Settings` tipado ou lança um `Error` listando todos os campos inválidos.
+  - `requireOpenRouter(settings)`: Verifica a presença de `OPENROUTER_API_KEY` para fluxos que exigem autenticação obrigatória.
+  - `publicSettings(settings)`: Retorna um clone seguro das configurações omitindo `OPENROUTER_API_KEY`.
 
 #### [`src/core/errors/app-error.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/core/errors/app-error.ts)
 
-- **Papel:** Taxonomia unificada e tratamento de exceções da aplicação.
-- **Principais responsabilidades:**
-  - Define o tipo `ErrorStage`: identifica em qual etapa exata do fluxo o erro se originou (`configuration`, `pdf_extraction`, `chapter_detection`, `llm`, `summary`, `script_generation`, `storyboard`, `assets`, `audio`, `captions`, `rendering`, `quality_check`, `storage`, `general`).
-  - Define o tipo `ErrorCode`: códigos de erro formais (`INVALID_INPUT`, `PDF_TOO_LARGE`, `PDF_INVALID`, `PDF_PAGE_LIMIT`, `EMPTY_EXTRACTION`, `LLM_AUTH`, `LLM_INVALID_OUTPUT`, `TTS_FAILED`, `FFMPEG_MISSING`, `PROCESS_TIMEOUT`, `ARTIFACT_INVALID`, `VIDEO_QUALITY_FAILED`, `UNEXPECTED`).
-  - Implementa a classe `AppError extends Error`:
-    - Armazena `code`, `stage`, a flag booleana `retryable` (indicando se a operação pode ser reexecutada com sucesso) e suporta a propriedade nativa `cause` do Node.js para encadeamento de stack traces originais.
-  - Função utilitária `asError(v: unknown)`: Converte qualquer valor desconhecido (strings, objetos lançados) em uma instância garantida de `Error`.
+- **Responsabilidade:** Taxonomia estruturada de erros de domínio e infraestrutura.
+- **Tipos e Classes:**
+  - `ErrorStage`: `'configuration' | 'pdf_extraction' | 'chapter_detection' | 'llm' | 'summary' | 'script_generation' | 'storyboard' | 'assets' | 'audio' | 'captions' | 'rendering' | 'quality_check' | 'storage' | 'general'`.
+  - `ErrorCode`: `'INVALID_INPUT' | 'PDF_TOO_LARGE' | 'PDF_INVALID' | 'PDF_PAGE_LIMIT' | 'EMPTY_EXTRACTION' | 'LLM_AUTH' | 'LLM_INVALID_OUTPUT' | 'TTS_FAILED' | 'FFMPEG_MISSING' | 'PROCESS_TIMEOUT' | 'ARTIFACT_INVALID' | 'VIDEO_QUALITY_FAILED' | 'UNEXPECTED'`.
+  - `AppError`: Subclasse de `Error` que preserva a cadeia causal (`super(message, { cause })`) e adiciona metadados acionáveis (`code`, `stage`, `retryable`).
+  - `asError(v: unknown)`: Normaliza qualquer exceção capturada em bloco `catch` para uma instância garantida de `Error`.
 
 #### [`src/core/logging/redact.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/core/logging/redact.ts)
 
-- **Papel:** Sanitização de dados sensíveis e segurança contra vazamento de credenciais em logs e consoles.
-- **Principais responsabilidades:**
-  - Define expressões regulares para identificar padrões comuns de tokens e credenciais:
-    - Chaves do Google AI / GCP: `AIza[0-9A-Za-z\-_]{16,}`
-    - Tokens de acesso OAuth2: `ya29\.[0-9A-Za-z\-_]+`
-  - Função `sanitizeMessage(message, secrets, maxLength)`: Substitui tokens identificados por `[REDACTED_KEY]` e qualquer segredo específico passado por `[REDACTED]`, além de truncar mensagens que excedam o limite seguro (padrão: 2000 caracteres).
-  - Função `safeJson(value, secrets)`: Serializa com segurança qualquer objeto JSON aplicando a sanitização sobre a string resultante.
+- **Responsabilidade:** Prevenção contra vazamento de credenciais (Secret Redaction) em mensagens de erro, logs e payloads serializados.
+- **Expressão Regular `KEY`:**
+  - Detecta chaves do OpenRouter (`sk-or-v1-[0-9A-Za-z\-_]{16,}`), chaves genéricas padrão OpenAI/Anthropic (`sk-[0-9A-Za-z\-_]{20,}`), chaves Google (`AIza[0-9A-Za-z\-_]{16,}`) e tokens OAuth2 (`ya29\.[0-9A-Za-z\-_]+`), substituindo-as por `[REDACTED_KEY]`.
+- **Funções Exportadas:**
+  - `sanitizeMessage(message, secrets, maxLength = 2000)`: Aplica a regex `KEY`, mascara qualquer segredo explícito passado no array `secrets` (com comprimento $\ge 4$) por `[REDACTED]` e trunca mensagens longas adicionando `...[truncated]`.
+  - `safeJson(value, secrets)`: Serializa qualquer estrutura em JSON aplicando `sanitizeMessage`.
 
 ---
 
-### 3. Camada de Domínio (Domain)
+### 4.3 Camada de Domínio: Portas e Schemas (`src/domain/`)
 
 #### [`src/domain/ports/llm-provider.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/domain/ports/llm-provider.ts)
 
-- **Papel:** Porta (interface) hexagonal para integração com modelos de linguagem.
-- **Principais responsabilidades:**
-  - Define o contrato da interface `LlmProvider`:
-    ```typescript
-    export interface LlmProvider {
-      generateStructured<T>(prompt: string, schema: { parse(value: unknown): T }): Promise<T>;
-    }
-    ```
-  - Permite que qualquer provedor de IA (Google Gemini via `@google/genai`, OpenAI, Claude ou provedores locais) seja acoplado sem alterar nenhuma linha de código da camada de aplicação.
+- **Responsabilidade:** Porta hexagonal para geração estruturada validada por schema, parametrizada pelo tipo de atividade (`LlmTaskType`).
+- **Assinatura:**
+  ```typescript
+  export type LlmTaskType = 'summary' | 'script' | 'storyboard';
+  export type LlmCallOptions = { task?: LlmTaskType; systemPrompt?: string };
+  export interface LlmProvider {
+    generateStructured<T>(
+      prompt: string,
+      schema: { parse(value: unknown): T },
+      options?: LlmCallOptions,
+    ): Promise<T>;
+  }
+  ```
+
+#### [`src/domain/ports/tts-provider.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/domain/ports/tts-provider.ts)
+
+- **Responsabilidade:** Porta hexagonal para provedores de síntese de voz (Text-to-Speech) e cronometragem de segmentos.
+- **Contrato:**
+  - `synthesize(text, path)`: Gera o arquivo de áudio no caminho indicado e retorna `{ path, duration }` em segundos.
+  - `synthesizeSegments(segments, dir)`: Sintetiza uma lista de segmentos mantendo um cursor acumulativo (`startSeconds`, `endSeconds`) e retorna `{ timed: TimedSpeech[], duration: number }`.
+
+#### [`src/domain/ports/scene-provider.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/domain/ports/scene-provider.ts)
+
+- **Responsabilidade:** Porta hexagonal para renderizadores de quadros visuais (`StoryboardScene` ➔ arquivo `.png`).
+- **Contrato:**
+  - `create(scene, path, backgroundBuffer?)`: Gera a imagem PNG da cena na resolução configurada e retorna o caminho do arquivo gravado.
 
 #### [`src/domain/schemas/chapter.schema.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/domain/schemas/chapter.schema.ts)
 
-- **Papel:** Definição dos modelos de dados fundamentais sobre a estrutura do livro e capítulos.
-- **Principais responsabilidades:**
-  - `ChapterBoundarySchema`: Valida o número do capítulo, título, página inicial (`startPage`), página final (`endPage`) e evidências encontradas, garantindo via `.refine()` que `endPage >= startPage`.
-  - `ChapterMapSchema`: Representa a lista de capítulos detectados com anotações e avisos do processo.
-  - `SupportedClaimSchema`: Define uma afirmação/tese extraída com suas páginas de origem (`sourcePages`) e grau de confiança (`high`, `medium`, `low`).
-  - `ChapterSummarySchema`: Estrutura do resumo do capítulo, contendo tese central, pontos-chave, exemplos, definições suportadas por fontes, takeaway para a audiência, motivos visuais e limitações.
-  - `ChapterPackageSchema`: Pacote agregado que engloba metadados do capítulo, resumo, lista de roteiros gerados e ideias de imagens.
-  - Função `normalizeChapterSummary(input)`: Normalizador defensivo que suporta formatos legados onde afirmações podiam ser strings ou objetos, mescla referências de páginas em um `Set` ordenado e garante que nenhuma citação perca a rastreabilidade com a página original do livro.
+- **Responsabilidade:** Contratos de dados de estrutura capitular e resumos analíticos.
+- **Componentes:**
+  - `ChapterBoundarySchema`: Valida `{ number, title, startPage, endPage, evidence }` com refinamento garantindo `endPage >= startPage`.
+  - `SupportedClaimSchema`: Afirmação fundamentada com `{ claim, sourcePages, confidence }`.
+  - `ChapterSummarySchema`: Estrutura analítica contendo `title`, `thesis`, `keyPoints`, `examples`, `quotesOrDefinitions`, `definitions`, `supportedClaims`, `sourcePages`, `audienceTakeaway`, `visualMotifs` e `limitations`.
+  - `normalizeChapterSummary(input)`: Função pura de normalização defensiva. Converte objetos legados `{ claim, sourcePages }` presentes em `keyPoints` ou `examples` para strings limpas, preserva as afirmações estruturadas em `supportedClaims` e consolida todas as páginas citadas em um array `sourcePages` único e ordenado numericamente.
 
 #### [`src/domain/schemas/script.schema.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/domain/schemas/script.schema.ts)
 
-- **Papel:** Modelagem de roteiros audiovisuais segmentados e durações permitidas.
-- **Principais responsabilidades:**
-  - `DurationSchema`: Enumeração estrita das durações cinematográficas suportadas: `1` minuto (Shorts/Reels/TikTok), `3` minutos (pitch/visão geral) e `20` minutos (estudo aprofundado).
-  - `NarrationSegmentSchema`: Define uma unidade atômica de fala, contendo identificador sequencial (`id`), texto falado (`text`), sugestão de cena/b-roll (`sceneHint`), texto para sobreposição na tela (`onScreenText`) e páginas do livro que fundamentam o trecho (`sourcePages`).
-  - `VideoScriptSchema`: Estrutura completa do roteiro com gancho inicial (`hook`), batidas de narrativa (`beats`), narração completa, segmentos e chamada para ação (`cta`).
-  - Função `ensureScriptSegments(script, pages)`: Assegura que todo roteiro possua segmentos estruturados. Caso o modelo tenha retornado apenas texto contínuo, a função divide o conteúdo por quebras de parágrafo, distribui os tópicos das batidas como legendas de tela e atrela os identificadores `seg_0001`, `seg_0002`, etc.
+- **Responsabilidade:** Modelagem de roteiros cinematográficos multi-duração e segmentação automática.
+- **Componentes:**
+  - `DurationSchema`: União literal `1 | 3 | 20`.
+  - `NarrationSegmentSchema`: Unidade atômica de locução (`id`, `text`, `sceneHint`, `onScreenText`, `sourcePages`).
+  - `VideoScriptSchema`: Contrato completo do roteiro (`title`, `durationMinutes`, `targetAudience`, `hook`, `beats`, `narration`, `segments`, `cta`, `bRollAndVisuals`).
+  - `ensureScriptSegments(script, pages)`: Garante que todo `VideoScript` possua segmentos numerados (`seg_0001`, `seg_0002`, ...). Se o modelo LLM retornar apenas o texto corrido em `narration` (com `segments` vazio), fatia a narração por quebras duplas de linha (`\n\s*\n+`), associa ciclicamente as descrições de `bRollAndVisuals` em `sceneHint` e os títulos de `beats` em `onScreenText`, e propaga as páginas de referência (`sourcePages`).
 
 #### [`src/domain/schemas/video.schema.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/domain/schemas/video.schema.ts)
 
-- **Papel:** Máquina de estados finitos do vídeo, storyboard e relatório de inspeção técnica.
-- **Principais responsabilidades:**
-  - `VideoStatusSchema`: Ciclo de vida determinístico do vídeo:
-    `pending` ➔ `script_ready` ➔ `storyboard_ready` ➔ `assets_ready` ➔ `audio_ready` ➔ `captions_ready` ➔ `rendering` ➔ `rendered` ➔ `quality_checked` ➔ `completed` (com transição para `failed` permitida a partir de qualquer etapa).
-  - `StoryboardSceneSchema`: Especificação de cada cena visual, relacionando IDs de segmentos narrativos, prompt visual gerador da imagem, texto na tela e duração calculada em segundos.
-  - `QualityReportSchema`: Métricas de inspeção do vídeo final (codecs de vídeo e áudio, dimensões, fps, duração, presença de áudio, conformidade de legendas e lista de advertências/erros).
-  - `VideoManifestSchema`: Registro de estado de cada vídeo, armazenando caminhos relativos de todos os seus artefatos (`storyboardPath`, `narrationPath`, `captionsPath`, `videoPath`, `qualityReportPath`), contagem de tentativas e status.
-  - Funções `canTransition(from, to)` e `transition(manifest, to)`: Garantem que nenhuma etapa seja pulada indevidamente e registram o avanço do pipeline.
+- **Responsabilidade:** Contratos de storyboard, auditoria técnica (`QualityReport`), manifesto de vídeo (`VideoManifest`) e máquina de estados finitos (`VideoStatus`).
+- **Funções `canTransition(from, to)` e `transition(manifest, to)`**: Validam transições de estado na matriz determinística `transitions`, lançando erro em qualquer transição ilegal (como tentar mover um vídeo `completed` de volta para `rendering`).
 
 ---
 
-### 4. Camada de Aplicação (Application & Pipelines)
+### 4.4 Camada de Aplicação: Serviços e Pipelines (`src/application/`)
 
 #### [`src/application/services/chapter-detector.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/application/services/chapter-detector.ts)
 
-- **Papel:** Algoritmos heurísticos de identificação e validação de capítulos a partir de páginas de texto.
-- **Principais responsabilidades:**
-  - `likelyChapterPages(pages)`: Aplica expressão regular sensível a variações linguísticas (`/^\s*(cap[ií]tulo|chapter)\b/im`) no início das páginas para detectar prováveis inícios de capítulos.
-  - `validateBoundaries(chapters, total, strict)`: Valida se os limites dos capítulos estão dentro da quantidade total de páginas do livro e detecta colisões ou sobreposições entre capítulos consecutivos.
-  - `normalizeBoundaries(map, total, expected)`: Ordena os capítulos por página inicial, corrige sobreposições ajustando a página final do capítulo anterior para ser imediatamente anterior à página inicial do seguinte (`c.endPage = next.startPage - 1`) e gera avisos caso a quantidade encontrada divirja da informada pelo usuário.
-  - `parseChapterMap(value)`: Valida os limites com o schema de domínio.
+- **Responsabilidade:** Detecção heurística de inícios de capítulos e saneamento de intervalos de páginas.
+- **Funções:**
+  - `likelyChapterPages(pages)`: Inspeciona os primeiros 200 caracteres de cada página procurando cabeçalhos capitulares em português, inglês ou numerais por extenso (`capítulo`, `chapter`, `prólogo`, `epílogo`, `um` a `vinte`), descartando páginas de sumário/índice/créditos e páginas que mencionam a palavra "capítulo" mais de 2 vezes no corpo do texto.
+  - `validateBoundaries(chapters, total, strict)` e `normalizeBoundaries(map, total, expected)`: Ordenam os capítulos por `startPage`, corrigem sobreposições (`c.endPage = next.startPage - 1`), removem intervalos invertidos e registram avisos de divergência.
 
 #### [`src/application/services/script-generator.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/application/services/script-generator.ts)
 
-- **Papel:** Geração de roteiros adaptados para diferentes durações de vídeo.
-- **Principais responsabilidades:**
-  - Classe `ScriptGenerator`:
-    - Recebe opcionalmente uma instância de `LlmProvider`.
-    - No método `generate(summary, chapter, duration)`:
-      - Se a LLM estiver configurada, dispara o prompt solicitando a geração estruturada segundo o `VideoScriptSchema`.
-      - Se a LLM não estiver presente (execução offline ou modo fallback), constrói um roteiro determinístico completo compilando a tese, os pontos-chave e as conclusões extraídas no resumo do capítulo, vinculando todas as páginas originais de referência.
+- **Responsabilidade:** Geração de roteiros cinematográficos para `1`, `3` e `20` minutos.
+- **Estratégia Dual (LLM + Fallback Determinístico):**
+  - **Modo OpenRouter (`this.llm` presente)**: Configura metas estritas por duração:
+    - `1 min`: 120–150 palavras, 3 parágrafos/cenas, 3 beats.
+    - `3 min`: 380–450 palavras, 6 parágrafos/cenas, 5 beats.
+    - `20 min`: 2000–2500 palavras, 15 parágrafos/cenas, 8 beats.
+      Invoca `this.llm.generateStructured(prompt, VideoScriptSchema, { task: 'script' })` (que seleciona `OPENROUTER_SCRIPT_MODEL`, padrão `anthropic/claude-haiku-5.5`) e normaliza os segmentos via `ensureScriptSegments`.
+  - **Modo Determinístico (`generateDeterministic`)**: Caso a execução seja offline (sem chave) ou ocorra falha irrecuperável na rede, sintetiza localmente um roteiro completo estruturado em abertura (gancho + tese), cenas intermediárias (escalada dramática sobre os `keyPoints`) e encerramento (`audienceTakeaway` + CTA), garantindo que o pipeline nunca interrompa a geração dos pacotes.
 
 #### [`src/application/services/storyboard-generator.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/application/services/storyboard-generator.ts)
 
-- **Papel:** Transformação do roteiro narrativo em uma sequência cronológica de cenas visuais.
-- **Principais responsabilidades:**
-  - Função `createStoryboard(script, chapter)`:
-    - Itera sobre cada segmento do roteiro e gera uma cena (`scene_001`, `scene_002`...).
-    - Calcula dinamicamente a duração em segundos de cada cena baseando-se na densidade de palavras do texto da narração (taxa de conversão: ~2.3 palavras por segundo, com piso mínimo de 1 segundo).
-    - Preserva os prompts visuais e associa as páginas de referência do capítulo.
+- **Responsabilidade:** Transformação dos segmentos do roteiro em cenas visuais cronometradas (`StoryboardScene[]`).
+- **Cálculo inicial de duração:** Estima a duração inicial em segundos pela densidade lexical (`Math.max(1, words / 2.3)`), que posteriormente é sobrescrita pela duração acústica exata medida na etapa de síntese de voz (TTS).
 
 #### [`src/application/pipelines/book-pipeline.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/application/pipelines/book-pipeline.ts)
 
-- **Papel:** Orquestrador mestre do livro em alto nível.
-- **Principais responsabilidades:**
-  - Executa a extração inicial do arquivo PDF fornecido com limites de tamanho e páginas via `extractPdf`.
-  - Constrói a partição de capítulos (calculando intervalos de páginas correspondentes à quantidade esperada).
-  - Para cada capítulo:
-    - Normaliza o resumo do capítulo e agrega as páginas de fundamentação.
-    - Para cada duração solicitada (`1`, `3`, `20` minutos):
-      - Aciona o `ScriptGenerator` para criar o roteiro correspondente.
-      - Se a flag `renderVideos` estiver ativa, delega a renderização para o `VideoPipeline`.
-      - Registra eventuais falhas sem abortar os demais capítulos quando aplicável.
-  - Persiste de maneira atômica e padronizada os seguintes artefatos na raiz do diretório de saída:
-    - `book.json`: Dados gerais do livro e quantidade de capítulos processados.
-    - `mapa_capitulos.json`: Mapa completo de limites de páginas de cada capítulo.
-    - `capitulo_XX.json`: Pacote individual com resumos, roteiros e ideias de cada capítulo.
-    - `manifest.json`: Manifesto de execução geral com status (`completed` ou `partial`).
-    - `resultado_completo.json`: Consolidação de todos os pacotes de capítulos.
-    - `roteiros_e_ideias.md`: Documento Markdown consolidando os títulos e teses dos roteiros.
-    - `run_report.json`: Relatório técnico final contendo falhas registradas e métricas.
+- **Responsabilidade:** Orquestração ponta a ponta do processamento do livro.
+- **Destaques de Implementação:**
+  1. Extrai as páginas do PDF via `extractPdf(pdfPath, { maxBytes: 100MB, maxPages: 1000 })`.
+  2. Determina as fronteiras dos capítulos (`ChapterBoundary[]`) combinando `likelyChapterPages` com partição proporcional quando necessário.
+  3. Para cada capítulo, consolida o texto limpo (até `maxChunkChars`, padrão `12.000` caracteres) e solicita a análise crítica via `this.llm.generateStructured(..., ChapterSummarySchema, { task: 'summary' })` (que roteia para `OPENROUTER_SUMMARY_MODEL`). Se indisponível, constrói o resumo por extração heurística dos parágrafos iniciais.
+  4. **Paralelismo Controlado (`p-limit`)**: Dispara a geração dos roteiros para todas as durações solicitadas (`1`, `3`, `20` min) em paralelo respeitando o semáforo `limit = pLimit(this.concurrency)`.
+  5. Quando `renderVideos = true`, aciona o `VideoPipeline.render(script, c)` para cada roteiro, isolando eventuais falhas em `failedArtifacts` sem abortar os demais vídeos.
+  6. Persiste atomicamente os 7 artefatos globais na pasta de saída (`book.json`, `mapa_capitulos.json`, `capitulo_XX.json`, `manifest.json`, `resultado_completo.json`, `roteiros_e_ideias.md` e `run_report.json`).
 
 #### [`src/application/pipelines/video-pipeline.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/application/pipelines/video-pipeline.ts)
 
-- **Papel:** Orquestrador da renderização multimídia de cada vídeo individual.
-- **Principais responsabilidades:**
-  - Cria a estrutura de pastas do vídeo: `chapter_XX/video_XXmin/` contendo os subdiretórios `scenes/` e `audio/`.
-  - Aciona o `createStoryboard` para converter o roteiro em cenas.
-  - Dispara o `SharpSceneProvider` para criar as imagens gráficas de cada cena em `scenes/scene_XXX.png`.
-  - Dispara o sintetizador de voz (TTS) para gerar os arquivos de áudio por segmento e calcular os tempos exatos de início e fim (`timed segments`).
-  - Consolida o áudio mestre da narração (`narration.mp3`).
-  - Aciona o `buildSrt` para gerar o arquivo de legendas sincronizadas `captions.srt`.
-  - Aciona o `FfmpegRenderer` passando as imagens das cenas, suas durações e o áudio da narração para produzir o arquivo final `video.mp4`.
-  - Executa o `checkVideo` para auditar a conformidade técnica do MP4 gerado via `ffprobe`.
-  - Persiste o `quality_report.json` e o `manifest.json` com os caminhos relativos ao diretório base de saída.
+- **Responsabilidade:** Pipeline completo de produção audiovisual de um roteiro em um container `video.mp4` auditado.
+- **As 7 Etapas do Método `render(script, chapter)`:**
+  1. **Storyboard & Geração Paralela de Cenas (`p-limit(3)`)**: Cria as cenas via `createStoryboard` e invoca concorrentemente `this.sceneProvider.create(scene, 'scenes/scene_XXX.png')`.
+  2. **Síntese de Voz por Segmento**: Invoca `this.ttsProvider.synthesizeSegments(script.segments, 'audio')`, gerando `seg_0001.mp3`, `seg_0002.mp3`, etc., e obtendo os timestamps reais `timed`.
+  3. **Alinhamento Acústico-Visual**: Atualiza `scenes[i].durationSeconds = Math.max(1, timed.endSeconds - timed.startSeconds)` para que cada cena de vídeo permaneça na tela pelo tempo exato da fala correspondente.
+  4. **Concatenação do Áudio Mestre (`narration.mp3`)**: Se houver apenas 1 segmento, copia o arquivo; se houver múltiplos, gera `concat_audio.txt` (com escape seguro de aspas) e invoca `ffmpeg -f concat -safe 0 -c:a libmp3lame -b:a 128k narration.mp3` (com fallback para `-c copy` e limpeza garantida no `finally`).
+  5. **Geração de Legendas Sincronizadas (`captions.srt`)**: Invoca `buildSrt(audio.timed, captionsPath)`.
+  6. **Renderização MP4 (`FfmpegRenderer`)**: Codifica as imagens de cena, o áudio mestre e as legendas gravadas (`burnCaptions`) em `video.mp4`.
+  7. **Quality Gate (`checkVideo`) & Manifesto**: Audita o MP4 gerado com `ffprobe` e grava `quality_report.json` e `manifest.json`.
 
 ---
 
-### 5. Camada de Infraestrutura (Infrastructure & Adapters)
+### 4.5 Camada de Infraestrutura e Adaptadores (`src/infra/`)
 
-#### [`src/infra/pdf/pdf-extractor.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/infra/pdf/pdf-extractor.ts)
+#### [`src/infra/llm/openrouter-provider.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/infra/llm/openrouter-provider.ts)
 
-- **Papel:** Leitura, higienização e extração de texto de arquivos PDF sem depender de binários nativos pesados ou processos externos.
-- **Principais responsabilidades:**
-  - `cleanText(text)`: Limpa caracteres nulos (`\x00`), normaliza espaços consecutivos e remove quebras de linha excessivas.
-  - `extractPdf(path, options)`:
-    - Verifica a existência do arquivo e seu tamanho máximo (`maxBytes`).
-    - Valida o cabeçalho do arquivo verificando a assinatura mágica `%PDF-`.
-    - Realiza a divisão das páginas procurando delimitadores de form feed (`\f`) e marcadores de estrutura interna `/Type /Page`.
-    - Valida se o documento excede o limite de páginas configurado.
-    - Emite `AppError` com códigos específicos (`PDF_TOO_LARGE`, `PDF_INVALID`, `PDF_PAGE_LIMIT`, `EMPTY_EXTRACTION`) permitindo tratamento semântico de erros.
-  - `getRange(pages, start, end)`: Extrai e rotula de forma contígua o texto pertencente a uma faixa de páginas com indicação explícita `[Página X]`.
+- **Responsabilidade:** Cliente HTTP/JSON nativo para o OpenRouter com seleção de modelo por atividade, multi-batch fallback e sanitização de erros.
+- **Métodos e Funções:**
+  - `buildModelBatches(primaryModel, fallbacks)`: Agrupa modelos únicos em lotes de no máximo 3 itens (`OPENROUTER_MAX_MODELS_PER_REQUEST = 3`).
+  - `extractJsonPayload(raw)`: Remove blocos `<think>...</think>`, extrai conteúdo de cercas Markdown ` ```json ` ou fatia entre o primeiro `{` e o último `}` antes do `JSON.parse`.
+  - `selectModelForTask(task)`: Retorna `this.scriptModel` para `'script'`, `this.storyboardModel` para `'storyboard'` e `this.summaryModel` para `'summary'`.
+  - `generateStructured(prompt, schema, options)`: Executa a chamada `POST ${baseUrl}/chat/completions` com headers `Authorization: Bearer`, `HTTP-Referer` e `X-Title`, `AbortSignal.timeout(this.timeoutMs)` e `response_format: { type: 'json_object' }`. Gerencia transições imediatas de lote em `HTTP 402`, retries com backoff exponencial + jitter em `408/429/5xx` e sanitização de `this.apiKey` em qualquer erro lançado.
 
-#### [`src/infra/storage/artifact-store.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/infra/storage/artifact-store.ts)
+#### [`src/infra/tts/openrouter-tts-provider.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/infra/tts/openrouter-tts-provider.ts)
 
-- **Papel:** Gerenciamento seguro de I/O de arquivos, diretórios e persistência atômica.
-- **Principais responsabilidades:**
-  - `stableHash(value)`: Gera hashes SHA-256 consistentes e ordenados por chave a partir de qualquer objeto para identificação de mudanças em roteiros e configurações.
-  - `atomicJson(path, value)`: Grava arquivos primeiro em uma extensão temporária (`.tmp`) e depois realiza um `rename` atômico do sistema operacional. Isso previne corrupção de arquivos caso o processo seja interrompido no meio da escrita.
-  - Classe `ArtifactStore`:
-    - Normaliza caminhos relativos sempre com barras normais (`/`), garantindo portabilidade entre Windows, Linux e macOS.
-    - Implementa helpers semânticos de caminhos: `chapterDir(n)` (`chapter_01`), `videoDir(n, d)` (`chapter_01/video_03min`).
-    - Valida segurança contra ataques de _path traversal_ garantindo que nenhum arquivo seja gravado fora do diretório base.
-    - Métodos especializados para carregar e salvar manifestos e roteiros validados com Zod.
+- **Responsabilidade:** Provedor de síntese de voz neural via OpenRouter (`openai/gpt-audio-mini` / `openai/gpt-audio`) com fallback transparente para síntese local.
+- **Funcionamento Interno:**
+  - Envia `POST /api/v1/chat/completions` com `models: [this.model, 'openai/gpt-audio']`, `modalities: ['text', 'audio']` e `audio: { voice: this.voice, format: 'mp3' }`.
+  - Decodifica o payload base64 retornado em `choices[0].message.audio.data`, grava atomicamente via arquivo `.tmp` + `rename` e inspeciona a duração acústica exata em segundos executando `ffprobe` (`probeDurationSeconds`).
+  - Caso a conta não possua saldo para modalidade de áudio (`HTTP 402`), ocorra timeout ou a chave não esteja definida, delega automaticamente a chamada para `this.fallback` ([`FakeTtsProvider`](file:///Users/rafaelaparecido/Documents/DocToCine/src/infra/tts/fake-tts-provider.ts)), garantindo geração ininterrupta.
 
 #### [`src/infra/tts/fake-tts-provider.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/infra/tts/fake-tts-provider.ts)
 
-- **Papel:** Provedor determinístico de síntese de voz (TTS) para desenvolvimento, testes e execução sem custo de API externa.
-- **Principais responsabilidades:**
-  - Sintetiza arquivos de áudio WAV válidos com cabeçalho canônico RIFF de 44 bytes em memória (`Buffer`), taxa de amostragem de 8 kHz e 16 bits mono.
-  - Calcula a duração exata do áudio com base na contagem de palavras do texto (padrão: 0.12 segundos por palavra).
-  - Em `synthesizeSegments`, calcula um cursor temporal cumulativo (`startSeconds`, `endSeconds`) gerando metadados de sincronização temporal precisos para a construção das legendas.
+- **Responsabilidade:** Síntese de voz local determinística e sem custo de API externa.
+- **Duas Camadas Locais:**
+  1. **Voz Neural Nativa macOS (`trySay`)**: Em ambientes `darwin`, invoca o sintetizador do sistema `say -v Luciana` (voz em português do Brasil) gerando um arquivo `.aiff` temporário, converte para `.mp3` (`libmp3lame 128k`) via `ffmpeg` e extrai a duração exata via `ffprobe`.
+  2. **Gerador Acústico PCM WAV (`Fallback Universal`)**: Em servidores Linux/CI sem `say`, constrói em memória um `Buffer` contendo um arquivo WAV RIFF/PCM canônico (cabeçalho de 44 bytes, 8000 Hz, 16-bit mono) com uma onda senoidal suave de 220 Hz modulada por envelope de _attack/release_ (fade-in/fade-out de 100ms) e converte para `.mp3` via `ffmpeg`.
 
-#### [`src/infra/media/srt-builder.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/infra/media/srt-builder.ts)
+#### [`src/infra/media/openrouter-scene-provider.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/infra/media/openrouter-scene-provider.ts)
 
-- **Papel:** Construção e análise de legendas no formato padrão SubRip (`.srt`).
-- **Principais responsabilidades:**
-  - `time(seconds)`: Formata segundos decimais na representação cronológica do SRT (`HH:MM:SS,mmm`).
-  - `chunks(text)`: Fragmenta o texto falado em blocos confortáveis para leitura na tela (máximo de 8 palavras ou 55 caracteres por linha).
-  - `buildSrt(segments, path)`: Distribui as falas proporcionalmente no intervalo de tempo de cada segmento, gerando números de sequência contínuos e escrevendo o arquivo de forma atômica (`.tmp` seguido de `rename`).
-  - `parseSrtCues(path)`: Lê um arquivo `.srt` e converte as marcações em tuplas tipadas contendo número, tempo inicial em segundos, tempo final em segundos e texto, viabilizando verificações automatizadas de integridade.
+- **Responsabilidade:** Geração de ilustrações cinematográficas por cena via OpenRouter (`google/gemini-3.1-flash-lite-image` com fallback para `openai/gpt-5-image-mini`) e composição visual via [`SharpSceneProvider`](file:///Users/rafaelaparecido/Documents/DocToCine/src/infra/media/sharp-scene-provider.ts).
+- **Funcionamento Interno:**
+  - Determina o `aspectRatio` (`'16:9'` ou `'9:16'`) a partir das dimensões do vídeo e solicita ao OpenRouter (`modalities: ['image', 'text']`, `image_config: { aspect_ratio }`) uma ilustração atmosférica sem texto para `scene.visualPrompt`.
+  - Extrai o Data URL base64 (`data:image/png;base64,...`) de `choices[0].message.images[0].image_url.url` (ou inline em `message.content`), converte em `Buffer` (`decodeDataUrlToBuffer`) e repassa para `this.compositor.create(scene, path, bg)`.
+  - Se a chamada falhar ou retornar `402` (Free Tier), `fetchAiBackground` retorna `undefined` e o `SharpSceneProvider` renderiza instantaneamente a cartela vetorial completa.
 
 #### [`src/infra/media/sharp-scene-provider.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/infra/media/sharp-scene-provider.ts)
 
-- **Papel:** Geração de cartelas visuais e backgrounds das cenas via processamento de imagem com a biblioteca `sharp`.
-- **Principais responsabilidades:**
-  - Recebe as dimensões do vídeo configuradas (padrão: 1920x1080).
-  - Constrói programaticamente um modelo vetorial SVG com gradiente moderno (tons escuros `#111827` para violeta `#7c3aed`), fundo escuro e tipografia com escape correto de caracteres XML (`&amp;`, `&lt;`, etc.).
-  - Converte o SVG para PNG de alta qualidade gravando no caminho de saída correspondente à cena (`scenes/scene_XXX.png`).
+- **Responsabilidade:** Motor gráfico de alta velocidade baseado em `sharp` (libvips) para criação e composição das cenas em PNG.
+- **Recursos Gráficos:**
+  - Possui 6 paletas de cores cinematográficas (`PALETTES`) alternadas dinamicamente pelo número da cena.
+  - Realiza quebra automática de linhas (`wrapLines`) proporcional à largura do vídeo e escapa caracteres especiais XML (`esc`).
+  - Constrói um layout vetorial SVG contendo gradiente radial, badge superior da cena (`SCENE_001`), título principal com `drop-shadow`, subtítulo com o motivo visual e barra de progresso proporcional no rodapé.
+  - **Modo Híbrido (IA + SVG)**: Quando recebe `backgroundBuffer` do `OpenRouterSceneProvider`, redimensiona a imagem gerada por IA com `fit: 'cover'`, reduz a opacidade do gradiente SVG para criar uma vinheta escura de leitura (`stop-opacity: 0.55..0.82`) e compõe a camada tipográfica vetorial sobre a arte da IA.
+
+#### [`src/infra/pdf/pdf-extractor.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/infra/pdf/pdf-extractor.ts)
+
+- **Responsabilidade:** Extração segura de texto página a página usando `pdfjs-dist`.
+- **Validações de Segurança:**
+  - Verifica existência do arquivo e bloqueia arquivos maiores que `maxBytes` (`PDF_TOO_LARGE`).
+  - Inspeciona os primeiros 5 bytes do buffer exigindo a assinatura mágica `%PDF-` (`PDF_INVALID`).
+  - Bloqueia documentos que ultrapassem `maxPages` (`PDF_PAGE_LIMIT`).
+  - Higieniza caracteres nulos (`\x00`) e espaços redundantes via `cleanText` e lança `EMPTY_EXTRACTION` caso o PDF seja composto apenas por imagens digitalizadas sem camada de texto.
+
+#### [`src/infra/storage/artifact-store.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/infra/storage/artifact-store.ts)
+
+- **Responsabilidade:** Persistência transacional em disco e prevenção contra corrupção de arquivos e _path traversal_.
+- **Funções e Métodos:**
+  - `stableHash(value)`: Calcula hash SHA-256 determinístico ordenando as chaves do objeto.
+  - `atomicJson(path, value)`: Escreve o JSON formatado em `${path}.tmp` e executa `rename(tmp, path)` (operação atômica no filesystem POSIX).
+  - `ArtifactStore.saveJson(name, value)`: Resolve o caminho final e valida estritamente `p.startsWith(resolve(this.baseDir) + sep)`, bloqueando qualquer tentativa de escrita fora do diretório de saída (`../`).
+
+#### [`src/infra/media/srt-builder.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/infra/media/srt-builder.ts)
+
+- **Responsabilidade:** Geração e parsing verificável de arquivos de legenda SubRip (`.srt`).
+- **Algoritmo:** Divide cada segmento falado em blocos ergonômicos de leitura (`chunks`: máximo de 8 palavras ou 55 caracteres), distribui o tempo proporcionalmente dentro da janela `[startSeconds, endSeconds]` garantindo monotonia temporal (`start = Math.max(last, s.startSeconds)`), formata timestamps no padrão `HH:MM:SS,mmm` e grava de forma atômica via `.tmp`. Inclui `parseSrtCues(path)` para validação reversa.
 
 #### [`src/infra/media/ffmpeg-renderer.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/infra/media/ffmpeg-renderer.ts)
 
-- **Papel:** Motor de montagem e renderização audiovisual via FFmpeg.
-- **Principais responsabilidades:**
-  - Executa o comando binário `ffmpeg` com `shell: false` via `child_process.spawn`, prevenindo vulnerabilidades de injeção de comandos.
-  - Cria um arquivo de instruções de concatenação (`.concat.txt`) especificando cada imagem e seu tempo exato de exibição.
-  - Executa a codificação do vídeo em arquivo temporário (`.partial.mp4`):
-    - Demuxer `concat` com `-safe 0`.
-    - Vinculação com o arquivo de áudio mestre (`-i audioPath`).
-    - Parâmetro `-shortest` para evitar caudas de vídeo desincronizadas com o áudio.
-    - Filtro de redimensionamento e espaço de cor padronizado: `scale=W:H,format=yuv420p` (compatibilidade universal em navegadores, QuickTime e dispositivos móveis).
-    - Codec de vídeo: `libx264` com controle de `preset` e taxa constante de quantização `crf`.
-    - Codec de áudio: `aac` a 128 kbps.
-  - Ao finalizar a renderização com código de sucesso 0, renomeia atomicamente o arquivo `.partial.mp4` para o destino final `video.mp4` e limpa os arquivos temporários no bloco `finally`.
+- **Responsabilidade:** Renderização de vídeo MP4 via `ffmpeg`.
+- **Segurança e Codificação:**
+  - Invoca `spawn('ffmpeg', args, { shell: false })` sem interpolação de shell.
+  - Gera lista demuxer `.concat.txt` com a duração exata de cada quadro PNG (repetindo o último frame conforme exigência do filtro `concat` do FFmpeg).
+  - Aplica filtro `-vf scale=W:H,format=yuv420p` e, quando `burnCaptions: true`, anexa `,subtitles='...'` para queimar as legendas diretamente no stream de vídeo.
+  - Codifica vídeo em `libx264` (`-preset`, `-crf`) e áudio em `aac` (`128k`), gravando em `.partial.mp4` e renomeando atomicamente para `video.mp4` apenas após código de saída `0`.
 
 #### [`src/infra/media/video-quality-checker.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/infra/media/video-quality-checker.ts)
 
-- **Papel:** Auditoria e controle de qualidade automatizado (Quality Gate) dos vídeos gerados.
-- **Principais responsabilidades:**
-  - `probe(path)`: Invoca o `ffprobe` com saída em JSON (`-print_format json -show_streams -show_format`) com `shell: false`.
-  - `checkVideo(path, expected)`:
-    - Verifica se o arquivo existe e possui tamanho superior a 100 bytes (eliminando saídas vazias ou corrompidas).
-    - Analisa a existência do stream de vídeo e do stream de áudio.
-    - Confere se as dimensões reais de largura e altura coincidem com a resolução esperada.
-    - Extrai a duração total reportada no container.
-    - Preenche o `QualityReportSchema` indicando se o arquivo foi aprovado (`passed: true`) ou reprovado (`passed: false`), listando detalhadamente cada não conformidade identificada.
+- **Responsabilidade:** Quality Gate automatizado via `ffprobe`.
+- **Inspeções:** Verifica existência e tamanho mínimo (`> 100 bytes`), executa `ffprobe -print_format json -show_streams -show_format`, confirma a presença obrigatória de stream de vídeo e stream de áudio, valida se `width` e `height` reais coincidem exatamente com a resolução solicitada e retorna um `QualityReport` validado pelo Zod.
 
 ---
 
-### 6. Testes Unitários
+### 4.6 Suítes de Testes Automatizados (`tests/unit/`)
 
-#### [`tests/unit/domain.test.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/tests/unit/domain.test.ts)
-
-- **Papel:** Suíte de verificação de invariantes de domínio e contratos com `vitest`.
-- **Casos de teste cobertos:**
-  1. _Validações de duração e segmentação legada:_ Garante que durações inválidas (ex: 5 minutos) disparem erro do Zod e confirma que textos de narração contínuos com quebras duplas de linha sejam devidamente fatiados em `seg_0001`, `seg_0002` com as páginas herdadas.
-  2. _Normalização de resumos e retenção de páginas:_ Verifica se a função `normalizeChapterSummary` preserva alegações estruturadas legadas e constrói o array `sourcePages` contendo as páginas corretas.
-  3. _Sanitização de credenciais e máquina de estados:_ Confirma que tokens com prefixo `AIza...` e palavras-chave customizadas são devidamente ocultadas da mensagem, e valida transições permitidas (`pending -> script_ready`) e proibidas (`completed -> rendering`).
-
----
-
-### 7. Arquivos de Configuração do Ecossistema
-
-- [`package.json`](file:///Users/rafaelaparecido/Documents/DocToCine/package.json):
-  - Declara `"type": "module"` para ESM nativo.
-  - Restringe o runtime em `"engines"` para `node: ">=24 <25"`.
-  - Configura o binário `"bin": { "lcbooks": "dist/main.js" }`.
-  - Define scripts de ciclo de vida:
-    - `npm run dev`: Execução direta com compilação JIT via `tsx`.
-    - `npm run build`: Compilação TypeScript de produção com `tsc -p tsconfig.build.json`.
-    - `npm start`: Execução do binário compilado em `dist/main.js`.
-    - `npm run typecheck`: Checagem rigorosa de tipos sem emissão de arquivos (`tsc --noEmit`).
-    - `npm run lint`: Análise estática com ESLint em `src` e `tests`.
-    - `npm run format:check` e `npm run format`: Checagem e formatação automática com Prettier.
-    - `npm test`: Execução da suíte Vitest em modo headless.
-    - `npm run check`: Pipeline local que executa formatação, lint, checagem de tipos e testes unitários em sequência.
-- [`tsconfig.json`](file:///Users/rafaelaparecido/Documents/DocToCine/tsconfig.json):
-  - Configurado com `target: "ES2022"`, `module: "NodeNext"`, `moduleResolution: "NodeNext"`, e flags rígidas: `strict`, `noImplicitAny`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`.
-- [`tsconfig.build.json`](file:///Users/rafaelaparecido/Documents/DocToCine/tsconfig.build.json):
-  - Estende o `tsconfig.json`, isolando o escopo de compilação estritamente para `src/**/*.ts` com saída em `dist/`.
-- [`eslint.config.js`](file:///Users/rafaelaparecido/Documents/DocToCine/eslint.config.js):
-  - Configuração moderna do ESLint 9 (Flat Config) utilizando `typescript-eslint`, banindo o uso de `any` explícito (`@typescript-eslint/no-explicit-any: error`).
-- [`vitest.config.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/vitest.config.ts):
-  - Configura o Vitest para detectar arquivos de teste em `tests/**/*.test.ts` e suporte a relatórios de cobertura V8.
-- [`.github/workflows/ci.yml`](file:///Users/rafaelaparecido/Documents/DocToCine/.github/workflows/ci.yml):
-  - Workflow automatizado de CI que é disparado a cada `push` e `pull_request` no repositório. Prepara o Node.js 24, instala dependências via `npm ci` utilizando cache do `package-lock.json`, executa o `npm run check` e realiza o build com `npm run build`.
-- [`.prettierrc.json`](file:///Users/rafaelaparecido/Documents/DocToCine/.prettierrc.json) e [`.prettierignore`](file:///Users/rafaelaparecido/Documents/DocToCine/.prettierignore):
-  - Regras de formatação de código e exclusão de diretórios como `dist`, `coverage`, `node_modules` e pastas de artefatos de saída `saida*`.
-- [`.gitignore`](file:///Users/rafaelaparecido/Documents/DocToCine/.gitignore):
-  - Ignora pastas de compilação, dependências, arquivos de variáveis de ambiente (`.env`), arquivos de sistema (`.DS_Store`) e saídas do pipeline.
+- **[`tests/unit/domain.test.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/tests/unit/domain.test.ts)**:
+  - Valida rejeição de durações inválidas e fatiamento automático de parágrafos em `ensureScriptSegments`.
+  - Valida normalização de afirmações legadas e agregação de páginas em `normalizeChapterSummary`.
+  - Testa a sanitização de chaves `AIza...` e `sk-or-v1-...` em `sanitizeMessage` e transições da máquina de estados `canTransition`.
+  - Testa `loadSettings`, valores padrão dos modelos OpenRouter por atividade, bloqueio de `OPENROUTER_BASE_URL` HTTP insegura, `requireOpenRouter` e remoção de credenciais em `publicSettings`.
+- **[`tests/unit/openrouter.test.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/tests/unit/openrouter.test.ts)**:
+  - Testa `extractJsonPayload` com tags `<think>...</think>` e blocos Markdown ` ```json `.
+  - Testa `buildModelBatches` garantindo lotes máximos de 3 modelos.
+  - Testa `OpenRouterLlmProvider` verificando seleção do modelo por tarefa (`script` vs `summary`) e failover automático entre lotes quando ocorre `HTTP 402`.
+  - Verifica que chaves `sk-or-v1-*` jamais vazam em exceções quando todas as tentativas falham (`HTTP 401`).
+  - Testa `OpenRouterTtsProvider` garantindo fallback automático para síntese local quando a API retorna `HTTP 402`.
+  - Testa `OpenRouterSceneProvider` validando decodificação de imagem base64 e composição gráfica com `SharpSceneProvider` nas dimensões exatas (`640x360`).
+  - Testa a integração de `ScriptGenerator` garantindo o envio de `{ task: 'script' }` para a porta `LlmProvider`.
 
 ---
 
-## Fluxo de Execução do Pipeline Ponta a Ponta
+### 4.7 Configurações do Ecossistema e CI/CD
 
-Quando o comando `lcbooks` é disparado, o ciclo de vida completo ocorre nas seguintes etapas:
+- [`package.json`](file:///Users/rafaelaparecido/Documents/DocToCine/package.json): Projeto ESM (`"type": "module"`), Node `>=24 <25`, zero SDKs proprietários pesados (comunicação OpenRouter 100% via `fetch` nativo do Node 24).
+- [`tsconfig.json`](file:///Users/rafaelaparecido/Documents/DocToCine/tsconfig.json) & [`tsconfig.build.json`](file:///Users/rafaelaparecido/Documents/DocToCine/tsconfig.build.json): TypeScript estrito com `strict: true`, `noImplicitAny: true`, `noUncheckedIndexedAccess: true` e `exactOptionalPropertyTypes: true`.
+- [`eslint.config.js`](file:///Users/rafaelaparecido/Documents/DocToCine/eslint.config.js): ESLint 9 Flat Config com proibição estrita de `any` (`@typescript-eslint/no-explicit-any: 'error'`).
+- [`.github/workflows/ci.yml`](file:///Users/rafaelaparecido/Documents/DocToCine/.github/workflows/ci.yml): Pipeline GitHub Actions executando `npm ci`, `npm run check` (`format:check`, `lint`, `typecheck`, `test`) e `npm run build` em Node.js 24.
 
-```text
-[1. Entrada]
-   └── PDF fornecido é validado (tamanho, assinatura %PDF-, páginas)
+---
 
-[2. Análise Estrutural]
-   └── Texto é extraído e dividido em capítulos ordenados (ChapterBoundary)
+## 5. Fluxo de Execução Ponta a Ponta (End-to-End Lifecycle)
 
-[3. Síntese e Roteirização]
-   ├── Extração da tese central, pontos-chave e conceitos do capítulo
-   └── Para cada duração (1 min, 3 min, 20 min):
-         └── Geração do roteiro adaptado com beats narrativos e identificadores de segmento
+### 5.1 Diagrama de Sequência Completo
 
-[4. Produção de Mídia (se --render-videos for ativo)]
-   ├── Storyboard: Cálculo do tempo de exibição e divisão em cenas visuais
-   ├── Cartelas Visuais: Criação dos assets gráficos em PNG com gradiente SVG via Sharp
-   ├── Síntese de Voz: Geração de áudio WAV/MP3 com timestamps de cada fala
-   ├── Legendas: Criação do arquivo captions.srt formatado e sincronizado
-   ├── Renderização: Junção de cenas + áudio com codificação H.264/AAC via FFmpeg
-   └── Quality Gate: Inspeção técnica via ffprobe para validar resolução, fps, codecs e áudio
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as Usuário / CLI
+    participant Main as src/main.ts
+    participant Settings as settings.ts
+    participant Book as BookPipeline
+    participant PDF as pdf-extractor.ts
+    participant LLM as OpenRouterLlmProvider
+    participant Script as ScriptGenerator
+    participant Video as VideoPipeline
+    participant Scene as OpenRouterSceneProvider
+    participant TTS as OpenRouterTtsProvider
+    participant FFmpeg as FfmpegRenderer & ffprobe
+    participant Store as ArtifactStore
 
-[5. Persistência e Manifesto]
-   └── Escrita atômica de todos os JSONs, relatórios e do manifesto geral em disco
+    User->>Main: lcbooks livro.pdf -o saida -c 3 -d 1,3,20 --render-videos
+    Main->>Settings: loadSettings(process.env)
+    Settings-->>Main: Settings validadas (Zod)
+    Main->>Book: run(pdfPath, chapters=3, durations=[1,3,20], renderVideos=true)
+    Book->>PDF: extractPdf(pdfPath, { maxBytes, maxPages })
+    PDF-->>Book: ExtractedPage[] (texto limpo por página)
+    Book->>Book: likelyChapterPages() -> ChapterBoundary[]
+
+    loop Para cada Capítulo (c)
+        Book->>LLM: generateStructured(prompt, ChapterSummarySchema, { task: 'summary' })
+        Note over LLM: Lote 1: [gemini-3.5-flash-lite, nemotron:free, dots:free]<br/>Fallback automático se HTTP 402/429
+        LLM-->>Book: ChapterSummary validado (ou fallback heurístico)
+
+        par Geração Paralela por Duração (p-limit)
+            Book->>Script: generate(summary, c, duration=1)
+            Script->>LLM: generateStructured(prompt, VideoScriptSchema, { task: 'script' })
+            Note over LLM: Modelo primário: anthropic/claude-haiku-5.5
+            LLM-->>Script: VideoScript + ensureScriptSegments()
+        and
+            Book->>Script: generate(summary, c, duration=3)
+        and
+            Book->>Script: generate(summary, c, duration=20)
+        end
+
+        opt Se --render-videos ativo
+            loop Para cada VideoScript gerado
+                Book->>Video: render(script, chapter)
+                Video->>Video: createStoryboard(script, chapter)
+                par Cenas Visuais (p-limit 3)
+                    Video->>Scene: create(scene, scene_XXX.png)
+                    Note over Scene: OpenRouter (gemini-3.1-flash-lite-image)<br/>+ Composição SVG Sharp (ou fallback SVG puro)
+                end
+                Video->>TTS: synthesizeSegments(script.segments, audioDir)
+                Note over TTS: OpenRouter (openai/gpt-audio-mini)<br/>ou Fallback FakeTtsProvider (say Luciana / WAV)
+                TTS-->>Video: { timed: TimedSpeech[], duration }
+                Video->>Video: Sincroniza durationSeconds de cada cena com áudio real
+                Video->>FFmpeg: Concatena seg_*.mp3 -> narration.mp3
+                Video->>Video: buildSrt(timed, captions.srt)
+                Video->>FFmpeg: Renderiza cenas + narration.mp3 + captions.srt -> video.mp4
+                Video->>FFmpeg: checkVideo(video.mp4) via ffprobe
+                Video->>Store: Salva quality_report.json e manifest.json
+            end
+        end
+    end
+
+    Book->>Store: Grava atomicamente book.json, mapa_capitulos.json, capitulo_XX.json, resultado_completo.json, roteiros_e_ideias.md, manifest.json, run_report.json
+    Book-->>Main: RunResult { packages, videoPaths, failedArtifacts }
+    Main-->>User: JSON Summary (exit code 0, 1 ou 2)
+```
+
+### 5.2 Passo a Passo Técnico da Execução
+
+1. **Inicialização e Saneamento**: `main.ts` valida os parâmetros da CLI e carrega o `.env` via `loadSettings()`.
+2. **Ingestão Segura do PDF**: `extractPdf` verifica os bytes mágicos `%PDF-`, limites de megabytes/páginas e extrai o texto higienizado de cada página usando `pdfjs-dist`.
+3. **Mapeamento de Capítulos**: `likelyChapterPages` localiza as páginas de início de cada capítulo e constrói objetos `ChapterBoundary` validados.
+4. **Análise Crítica (`task: 'summary'`)**: `BookPipeline` envia até `12.000` caracteres do capítulo ao `OpenRouterLlmProvider`, que prioriza `google/gemini-3.5-flash-lite` (com failover para a cadeia `:free`) para extrair tese, pontos-chave, takeaway e motivos visuais.
+5. **Roteirização Concorrente (`task: 'script'`)**: `ScriptGenerator` dispara concorrentemente (via `p-limit`) os prompts para `1`, `3` e `20` minutos usando `anthropic/claude-haiku-5.5` (ou cadeia `:free` / gerador determinístico), assegurando que cada parágrafo vire um `NarrationSegment` rastreável.
+6. **Produção Visual e Sonora (`VideoPipeline`)**:
+   - Cenas são geradas via `OpenRouterSceneProvider` (`google/gemini-3.1-flash-lite-image`) e compostas com tipografia vetorial no `SharpSceneProvider`.
+   - Segmentos de voz são sintetizados via `OpenRouterTtsProvider` (`openai/gpt-audio-mini`) ou `FakeTtsProvider`, atualizando a duração exata de cada cena.
+   - O áudio consolidado (`narration.mp3`), as legendas (`captions.srt`) e os quadros PNG são unidos pelo `FfmpegRenderer` em `H.264/AAC` (`yuv420p`) e auditados pelo `checkVideo` (`ffprobe`).
+7. **Persistência Transacional**: `ArtifactStore` grava todos os artefatos usando escrita temporária `.tmp` seguida de `rename` atômico.
+
+### 5.3 Máquina de Estados Finitos do Vídeo
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending
+    pending --> script_ready
+    script_ready --> storyboard_ready
+    storyboard_ready --> assets_ready
+    assets_ready --> audio_ready
+    audio_ready --> captions_ready
+    captions_ready --> rendering
+    rendering --> rendered
+    rendered --> quality_checked
+    quality_checked --> completed
+    completed --> [*]
+
+    pending --> failed
+    script_ready --> failed
+    storyboard_ready --> failed
+    assets_ready --> failed
+    audio_ready --> failed
+    captions_ready --> failed
+    rendering --> failed
+    rendered --> failed
+    quality_checked --> failed
+
+    failed --> pending : retry
+    failed --> storyboard_ready : resume
 ```
 
 ---
 
-## Estrutura de Artefatos Gerados
+## 6. Estrutura de Artefatos Gerados e Contratos JSON
 
-Ao processar um livro com `--output saida --chapters 3 --durations 1,3,20 --render-videos`, o diretório de destino é estruturado da seguinte forma:
+Ao executar o pipeline com `--output saida --chapters 3 --durations 1,3,20 --render-videos`, a árvore gerada em disco é:
 
 ```text
 saida/
-├── book.json                    # Metadados da fonte e quantidade de capítulos
-├── mapa_capitulos.json          # Mapeamento com intervalos de páginas e evidências
-├── capitulo_01.json             # Resumo analítico, tese e roteiros do capítulo 1
-├── capitulo_02.json             # Resumo analítico, tese e roteiros do capítulo 2
-├── capitulo_03.json             # Resumo analítico, tese e roteiros do capítulo 3
-├── roteiros_e_ideias.md         # Documento em Markdown consolidando roteiros
-├── resultado_completo.json      # Consolidação de todos os pacotes em um único JSON
-├── run_report.json              # Relatório de status e lista de artefatos pendentes
-├── manifest.json                # Manifesto mestre de status da execução
+├── book.json                    # { "source": "/abs/path/livro.pdf", "chapters": 3 }
+├── mapa_capitulos.json          # Limites de páginas (startPage, endPage) e evidências
+├── capitulo_01.json             # Pacote completo: resumo + roteiros (1, 3, 20m) + imageIdeas
+├── capitulo_02.json
+├── capitulo_03.json
+├── roteiros_e_ideias.md         # Consolidação legível em Markdown das teses por capítulo
+├── resultado_completo.json      # Array completo com todos os ChapterPackages
+├── run_report.json              # { "failedArtifacts": [], "chapters": 3 }
+├── manifest.json                # { "status": "completed", "chapters": 3 }
 │
 ├── chapter_01/
 │   ├── video_01min/
 │   │   ├── scenes/
-│   │   │   ├── scene_001.png    # Cartela gráfica da cena 1
-│   │   │   └── scene_002.png    # Cartela gráfica da cena 2
+│   │   │   ├── scene_001.png    # Quadro visual 1920x1080 (ou 1080x1920) composto via IA + Sharp
+│   │   │   ├── scene_002.png
+│   │   │   └── scene_003.png
 │   │   ├── audio/
-│   │   │   ├── seg_0001.mp3     # Áudio sintetizado do segmento 1
-│   │   │   └── narration.mp3    # Áudio contínuo consolidado
-│   │   ├── captions.srt         # Legendas no padrão SRT
-│   │   ├── video.mp4            # Vídeo final renderizado em H.264/AAC
-│   │   ├── quality_report.json  # Relatório de aprovação técnica do vídeo
-│   │   └── manifest.json        # Manifesto com caminhos relativos e status do vídeo
+│   │   │   ├── seg_0001.mp3     # Áudio individual do segmento 1
+│   │   │   ├── seg_0002.mp3
+│   │   │   ├── seg_0003.mp3
+│   │   │   └── narration.mp3    # Faixa de narração contínua concatenada
+│   │   ├── captions.srt         # Legendas SubRip sincronizadas ao milissegundo
+│   │   ├── video.mp4            # Vídeo final H.264/AAC (yuv420p) com legendas integradas
+│   │   ├── quality_report.json  # Laudo técnico do ffprobe (codecs, resolução, duração, passed)
+│   │   └── manifest.json        # Manifesto individual do vídeo com caminhos relativos
 │   ├── video_03min/
 │   └── video_20min/
 ├── chapter_02/
@@ -528,79 +635,90 @@ saida/
 
 ---
 
-## Instalação, Configuração e Execução
+## 7. Instalação, Configuração e Execução
 
-### Pré-requisitos do Sistema
+### Pré-requisitos
 
-1. **Node.js**: Versão 24 LTS (`>=24 <25`).
-2. **FFmpeg & FFprobe**: Necessários para renderização de vídeos e verificação de conformidade técnica.
-   - No macOS: `brew install ffmpeg`
-   - No Ubuntu/Debian: `sudo apt-get update && sudo apt-get install -y ffmpeg`
+1. **Node.js**: Versão **24 LTS** (`>=24 <25`).
+2. **FFmpeg & FFprobe**: Disponíveis no `PATH` do sistema.
+   - macOS: `brew install ffmpeg`
+   - Ubuntu/Debian: `sudo apt-get update && sudo apt-get install -y ffmpeg`
 
 ### Instalação
-
-Na raiz do repositório, execute:
 
 ```bash
 npm ci
 ```
 
-### Configuração de Variáveis de Ambiente
+### Variáveis de Ambiente (`.env`)
 
-Copie o arquivo de exemplo e ajuste suas configurações conforme necessário:
+Copie o template `.env.example` para `.env`:
 
 ```bash
 cp .env.example .env
 ```
 
-Parâmetros principais no `.env`:
+Tabela completa de variáveis suportadas em [`src/config/settings.ts`](file:///Users/rafaelaparecido/Documents/DocToCine/src/config/settings.ts):
 
-- `GEMINI_API_KEY`: Chave da API do Google Gemini (necessária apenas para geração de roteiros via IA real).
-- `TTS_PROVIDER`: Defina como `fake` para testes locais e sem custo (padrão) ou `google_cloud` para síntese via Cloud Text-to-Speech.
-- `VIDEO_WIDTH` / `VIDEO_HEIGHT`: Padrão `1920` e `1080` (16:9).
+| Variável                       | Padrão                                       | Descrição                                                                                              |
+| :----------------------------- | :------------------------------------------- | :----------------------------------------------------------------------------------------------------- |
+| `OPENROUTER_API_KEY`           | _(opcional)_                                 | Chave da API do OpenRouter (`sk-or-v1-...`). Se omitida, o sistema opera em modo local determinístico. |
+| `OPENROUTER_BASE_URL`          | `https://openrouter.ai/api/v1`               | Endpoint base do OpenRouter (exige `https://` ou `localhost`).                                         |
+| `OPENROUTER_APP_URL`           | `https://github.com/doctocine/lcbooks`       | Header `HTTP-Referer` enviado ao OpenRouter para identificação do app.                                 |
+| `OPENROUTER_APP_TITLE`         | `DocToCine Pipeline`                         | Header `X-Title` enviado ao OpenRouter.                                                                |
+| `OPENROUTER_SUMMARY_MODEL`     | `google/gemini-3.5-flash-lite`               | Modelo primário para análise literária e resumo de capítulos (`task: 'summary'`).                      |
+| `OPENROUTER_SCRIPT_MODEL`      | `anthropic/claude-haiku-5.5`                 | Modelo primário para geração de roteiros cinematográficos (`task: 'script'`).                          |
+| `OPENROUTER_STORYBOARD_MODEL`  | `google/gemini-3.5-flash-lite`               | Modelo primário para estruturação de storyboard (`task: 'storyboard'`).                                |
+| `OPENROUTER_IMAGE_MODEL`       | `google/gemini-3.1-flash-lite-image`         | Modelo multimodal para geração de imagens das cenas do vídeo.                                          |
+| `OPENROUTER_AUDIO_MODEL`       | `openai/gpt-audio-mini`                      | Modelo multimodal para síntese neural de voz (narração em MP3).                                        |
+| `OPENROUTER_FALLBACK_MODELS`   | `nvidia/nemotron-3-super-120b-a12b:free,...` | Lista separada por vírgulas de modelos de fallback automático.                                         |
+| `OPENROUTER_TIMEOUT_MS`        | `45000`                                      | Timeout máximo por requisição HTTP ao OpenRouter (em milissegundos).                                   |
+| `LLM_CONCURRENCY`              | `3`                                          | Limite de chamadas simultâneas de geração de roteiros via `p-limit` (`1` a `10`).                      |
+| `SCENE_PROVIDER`               | `openrouter`                                 | `openrouter` (IA + composição Sharp) ou `sharp` (apenas cartelas SVG locais).                          |
+| `TTS_PROVIDER`                 | `openrouter`                                 | `openrouter` (áudio neural OpenRouter com fallback local) ou `fake` (síntese local).                   |
+| `TTS_LANGUAGE`                 | `pt-BR`                                      | Idioma da síntese de voz.                                                                              |
+| `TTS_VOICE`                    | `nova`                                       | Voz utilizada no modelo de áudio do OpenRouter (`alloy`, `nova`, `onyx`, etc.).                        |
+| `TTS_SPEAKING_RATE`            | `1`                                          | Velocidade da fala (`0.25` a `4.0`).                                                                   |
+| `VIDEO_WIDTH` / `VIDEO_HEIGHT` | `1920` / `1080`                              | Dimensões base do vídeo (invertidas automaticamente quando `--aspect-ratio 9:16`).                     |
+| `VIDEO_FPS`                    | `30`                                         | Taxa de quadros por segundo (`15` a `60`).                                                             |
+| `VIDEO_CRF`                    | `20`                                         | Qualidade constante H.264 (`16` a `30`, menor = maior qualidade).                                      |
+| `VIDEO_PRESET`                 | `medium`                                     | Preset de codificação x264 (`ultrafast`, `fast`, `medium`, `slow`).                                    |
+| `BURN_CAPTIONS`                | `true`                                       | Grava legendas `.srt` diretamente na faixa de vídeo (`true` ou `false`).                               |
+| `MAX_PDF_MB` / `MAX_PDF_PAGES` | `100` / `1000`                               | Limites máximos de segurança para o arquivo PDF de entrada.                                            |
+| `MAX_CHAPTER_CHARS_PER_CHUNK`  | `12000`                                      | Limite de caracteres enviados por capítulo ao modelo de resumo.                                        |
+| `MAX_RETRY_ATTEMPTS`           | `3`                                          | Número máximo de retentativas por lote de modelos em falhas transientes.                               |
 
-### Scripts de Qualidade e Compilação
+### Comandos de Desenvolvimento, Qualidade e Produção
 
 ```bash
-# Executar a verificação completa (formatação, lint, types e testes unitários):
+# Verificação completa (Prettier + ESLint + TypeScript Typecheck + Vitest):
 npm run check
 
-# Compilar o código TypeScript para JavaScript (dist/):
+# Compilar para produção (gera dist/):
 npm run build
 
-# Executar apenas a suíte de testes:
+# Executar testes unitários e de integração:
 npm test
 
-# Formatar o código-fonte automaticamente:
-npm run format
-```
+# Executar com relatório de cobertura V8:
+npm run coverage
 
-### Execução da CLI
+# Executar diretamente em desenvolvimento via tsx (apenas roteiros):
+npm run dev -- /caminho/para/livro.pdf --output saida --chapters 3 --durations 1,3,20
 
-Após compilar o projeto (`npm run build`), você pode executar:
+# Executar pipeline completo com renderização de vídeos MP4 (16:9):
+node dist/main.js /caminho/para/livro.pdf --output saida --chapters 3 --durations 1,3,20 --render-videos
 
-```bash
-# Visualizar a ajuda e todas as opções:
-node dist/main.js --help
-
-# Processar um PDF gerando roteiros para 3 capítulos nas durações de 1, 3 e 20 minutos:
-node dist/main.js livro.pdf --output saida --chapters 3 --durations 1,3,20
-
-# Processar um PDF gerando roteiros e renderizando os vídeos MP4 completos:
-node dist/main.js livro.pdf --output saida --chapters 3 --durations 1,3,20 --render-videos
-```
-
-Também é possível executar diretamente em desenvolvimento via `tsx`:
-
-```bash
-npm run dev -- livro.pdf --output saida --chapters 1 --durations 1
+# Executar pipeline para Shorts/Reels/TikTok na vertical (9:16):
+node dist/main.js /caminho/para/livro.pdf --output saida_vertical --chapters 1 --durations 1 --aspect-ratio 9:16 --render-videos
 ```
 
 ---
 
-## Práticas de Confiabilidade e Segurança
+## 8. Engenharia de Segurança, Desempenho e Boas Práticas
 
-1. **Escrita Atômica em Disco:** Todos os arquivos JSON, SRT e MP4 são escritos primeiramente com sufixo `.tmp` ou `.partial.mp4`. Apenas após a gravação completa e sem erros, o arquivo é renomeado atomicamente com `rename`. Isso impede arquivos corrompidos ou incompletos em caso de queda de energia ou cancelamento do processo.
-2. **Execução Segura de Processos:** Chamadas a ferramentas externas (`ffmpeg`, `ffprobe`) utilizam `child_process.spawn` com `{ shell: false }`, eliminando qualquer risco de injeção de comandos de shell através de nomes de arquivos.
-3. **Prevenção de Vazamento de Credenciais:** As mensagens e logs passam pelo módulo de sanitização (`src/core/logging/redact.ts`), que identifica e mascara automaticamente chaves de API (`AIza...`) e tokens de autorização.
-4. **Validação em Tempo de Execução:** Toda entrada externa (arquivos PDF, variáveis de ambiente, retornos de IA) é validada por schemas Zod antes de ingressar no fluxo de negócio.
+1. **Redação Automática de Credenciais (`redact.ts`)**: Qualquer erro HTTP, timeout ou falha de parsing passa por `sanitizeMessage` antes de ser propagado ou registrado, mascarando instantaneamente tokens `sk-or-v1-*`, `sk-*`, `AIza*` e `ya29.*`. A chave real reside exclusivamente no `.env` local (ignorado pelo Git).
+2. **Prevenção de SSRF e Downgrade de Protocolo (`settings.ts`)**: `OPENROUTER_BASE_URL` é validada via Zod para exigir `https://` em qualquer domínio remoto.
+3. **Execução de Subprocessos Livre de Shell Injection**: Todas as invocações a `ffmpeg`, `ffprobe` e `say` utilizam `child_process.spawn` com `{ shell: false }` e arrays de argumentos isolados.
+4. **Escrita Transacional Atômica e Anti-Path Traversal (`artifact-store.ts`)**: Todos os arquivos JSON, SRT, MP3 e MP4 são gravados primeiramente em arquivos temporários (`.tmp` ou `.partial.mp4`) e promovidos via `fs.rename` atômico, com validação estrita de prefixo de diretório (`p.startsWith(baseDir)`).
+5. **Concorrência Controlada (`p-limit`) e Timeouts Estritos (`AbortSignal.timeout`)**: A geração de roteiros e cenas ocorre em paralelo com limite configurável (`LLM_CONCURRENCY`), enquanto todas as chamadas `fetch` possuem timeout determinístico para evitar conexões penduradas.

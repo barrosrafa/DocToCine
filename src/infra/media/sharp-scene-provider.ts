@@ -2,6 +2,7 @@ import sharp from 'sharp';
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { StoryboardScene } from '../../domain/schemas/video.schema.js';
+import type { SceneAssetProvider } from '../../domain/ports/scene-provider.js';
 
 function esc(s: string) {
   return s.replace(
@@ -37,13 +38,13 @@ const PALETTES = [
   { bgStart: '#180c05', bgEnd: '#451a03', accent: '#fde68a', line: '#f59e0b', glow: '#d97706' },
 ];
 
-export class SharpSceneProvider {
+export class SharpSceneProvider implements SceneAssetProvider {
   constructor(
     readonly width = 1280,
     readonly height = 720,
   ) {}
 
-  async create(scene: StoryboardScene, path: string) {
+  async create(scene: StoryboardScene, path: string, backgroundBuffer?: Buffer): Promise<string> {
     await mkdir(dirname(path), { recursive: true });
 
     const sceneNum = parseInt(scene.sceneId.replace(/\D/g, '') || '1', 10);
@@ -66,13 +67,14 @@ export class SharpSceneProvider {
         : '';
 
     const startY = this.height * 0.42;
+    const hasCustomBg = Boolean(backgroundBuffer);
 
     const svg = `
 <svg width="${this.width}" height="${this.height}" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <radialGradient id="bg" cx="50%" cy="40%" r="75%">
-      <stop offset="0%" stop-color="${pal.bgEnd}" stop-opacity="0.9"/>
-      <stop offset="100%" stop-color="${pal.bgStart}" stop-opacity="1"/>
+      <stop offset="0%" stop-color="${pal.bgEnd}" stop-opacity="${hasCustomBg ? '0.55' : '0.9'}"/>
+      <stop offset="100%" stop-color="${pal.bgStart}" stop-opacity="${hasCustomBg ? '0.82' : '1'}"/>
     </radialGradient>
     <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="0%">
       <stop offset="0%" stop-color="${pal.line}"/>
@@ -102,7 +104,22 @@ export class SharpSceneProvider {
   <rect x="8%" y="90%" width="${Math.min(84, 15 + sceneNum * 12)}%" height="3" fill="url(#accentGrad)" rx="1.5"/>
 </svg>`;
 
-    await sharp(Buffer.from(svg)).png().toFile(path);
+    const overlayBuf = Buffer.from(svg);
+
+    if (backgroundBuffer) {
+      try {
+        await sharp(backgroundBuffer)
+          .resize(this.width, this.height, { fit: 'cover' })
+          .composite([{ input: overlayBuf, top: 0, left: 0 }])
+          .png()
+          .toFile(path);
+        return path;
+      } catch {
+        // Fallback to pure SVG render if background buffer is invalid
+      }
+    }
+
+    await sharp(overlayBuf).png().toFile(path);
     return path;
   }
 }

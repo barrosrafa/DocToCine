@@ -1,8 +1,9 @@
 import { mkdir, unlink, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { spawn } from 'node:child_process';
+import type { TimedSpeech, TtsProvider } from '../../domain/ports/tts-provider.js';
 
-export type Timed = { segmentId: string; text: string; startSeconds: number; endSeconds: number };
+export type Timed = TimedSpeech;
 
 function execProcess(cmd: string, args: string[]): Promise<string> {
   return new Promise((res, rej) => {
@@ -16,7 +17,7 @@ function execProcess(cmd: string, args: string[]): Promise<string> {
   });
 }
 
-export class FakeTtsProvider {
+export class FakeTtsProvider implements TtsProvider {
   constructor(readonly secondsPerWord = 0.4) {}
 
   private async trySay(text: string, path: string): Promise<number | null> {

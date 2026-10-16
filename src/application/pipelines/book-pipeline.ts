@@ -1,3 +1,4 @@
+import pLimit from 'p-limit';
 import { ArtifactStore } from '../../infra/storage/artifact-store.js';
 import { extractPdf } from '../../infra/pdf/pdf-extractor.js';
 import {
@@ -24,6 +25,8 @@ export class BookPipeline {
     readonly store: ArtifactStore,
     readonly video = new VideoPipeline(store),
     readonly llm?: LlmProvider,
+    readonly concurrency = 3,
+    readonly maxChunkChars = 12000,
   ) {}
 
   async run(
@@ -77,6 +80,7 @@ export class BookPipeline {
     const packages: ChapterPackage[] = [];
     const videoPaths: string[] = [];
     const failedArtifacts: [number, number][] = [];
+    const limit = pLimit(Math.max(1, this.concurrency));
 
     for (const c of boundaries) {
       const chapterPages = pages.slice(c.startPage - 1, c.endPage);
@@ -84,7 +88,7 @@ export class BookPipeline {
         .map((p) => p.text)
         .filter((t) => t.length > 30)
         .join(' ');
-      const sampleExcerpt = cleanChapterText.slice(0, 8000);
+      const sampleExcerpt = cleanChapterText.slice(0, this.maxChunkChars);
 
       let summary: ChapterSummary | null = null;
       if (this.llm) {
@@ -101,6 +105,7 @@ Retorne um JSON com os campos:
 Texto do capítulo:
 ${sampleExcerpt}`,
             ChapterSummarySchema,
+            { task: 'summary' },
           );
         } catch {
           summary = null;
@@ -138,11 +143,15 @@ ${sampleExcerpt}`,
         });
       }
 
-      const scripts = [];
+      const finalSummary = summary;
       const scriptGen = new ScriptGenerator(this.llm);
-      for (const d of durations) {
-        const script = await scriptGen.generate(summary, c, d);
-        scripts.push(script);
+      const scripts = await Promise.all(
+        durations.map((d) => limit(() => scriptGen.generate(finalSummary, c, d))),
+      );
+
+      for (let i = 0; i < durations.length; i++) {
+        const d = durations[i]!;
+        const script = scripts[i]!;
         if (renderVideos) {
           try {
             videoPaths.push(await this.video.render(script, c));

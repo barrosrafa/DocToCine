@@ -41,7 +41,9 @@ Requisitos estritos:
 
 Retorne APENAS um JSON válido respeitando o schema com todos os campos preenchidos.`;
 
-        const s = await this.llm.generateStructured(prompt, VideoScriptSchema);
+        const s = await this.llm.generateStructured(prompt, VideoScriptSchema, {
+          task: 'script',
+        });
         return ensureScriptSegments(s, summary.sourcePages);
       } catch {
         // Fall back to deterministic generation
